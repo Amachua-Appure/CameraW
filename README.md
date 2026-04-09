@@ -36,6 +36,10 @@ CameraW follows **Material Design 3** guidelines but does **not** implement Mate
 
 ---
 
+## Decoder
+The decoder for the .mlv files produced by this app can be found [here](https://github.com/Amachua-Appure/CameraW-mlv-Decoder)
+
+
 ## License
 
 CameraW is free software released under the **GNU General Public License version 3 (GPLv3)**.  
