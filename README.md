@@ -4,8 +4,8 @@ CameraW is an advanced, professional-grade camera application for Android. It is
 
 ---
 ## Background & Inspiration
+This project is inspired by open-source RAW video codecs such as [MLV](https://github.com/ilia3101/LibMLV) and draws direct inspiration from [MotionCam Pro](https://play.google.com/store/apps/details?id=com.motioncam.pro) — which might just be the "final boss" of RAW camera apps, pushing phones to their maximum capabilities. CameraW aims to open-source RAW video storage and enable direct video rendering from RAW sensor data, bypassing Android's built‑in ISPs. This approach allows even low‑end devices to harness RAW capture and push their hardware limits.
 
-This project is inspired by open-source RAW video codecs such as [MLV](https://github.com/ilia3101/LibMLV) and draws direct inspiration from [MotionCam Pro](https://play.google.com/store/apps/details?id=com.motioncam.pro) — widely regarded as the "final boss" of RAW camera apps, pushing phones to their maximum capabilities. CameraW aims to open-source RAW video storage and enable direct video rendering from RAW sensor data, bypassing Android's built‑in ISPs. This approach allows even low‑end devices to harness RAW capture and push their hardware limits.
 ---
 ## Key Features
 
