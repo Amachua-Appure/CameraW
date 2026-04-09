@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.CameraFeatureProbe" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:statusBarColor">@color/dark_bg</item>
+        <item name="android:navigationBarColor">@color/dark_bg</item>
+        <item name="android:windowBackground">@color/dark_bg</item>
+        <item name="colorPrimary">@color/blue_primary</item>
+        <item name="colorAccent">@color/red_record</item>
+    </style>
+</resources>

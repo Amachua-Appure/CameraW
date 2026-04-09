@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <!-- Flash Icon -->
+    <path
+        android:fillColor="#ff0000"
+        android:pathData="M7,2v11h3v9l7,-12h-4l4,-8z"/>
+
+    <!-- Bigger white dot, slightly to the left -->
+    <path
+        android:fillColor="#ff0000"
+        android:pathData="M15.5,17a3,3 0 1,0 0.01,0z"/>
+</vector>

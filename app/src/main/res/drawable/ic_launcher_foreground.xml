@@ -1,0 +1,50 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+
+    <!-- Scaled down to 45% and re-centered -->
+    <group
+        android:scaleX="0.5"
+        android:scaleY="0.5"
+        android:translateX="30"
+        android:translateY="30"
+        >
+
+        <!-- Camera body -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M20,35
+                h80
+                a8,8 0 0 1 8,8
+                v40
+                a8,8 0 0 1 -8,8
+                h-80
+                a8,8 0 0 1 -8,-8
+                v-40
+                a8,8 0 0 1 8,-8
+                z" />
+
+        <!-- Lens -->
+        <path
+            android:fillColor="#1B1B1B"
+            android:pathData="M76,48
+                a16,16 0 1,0 0.01,0z" />
+
+        <!-- Top rectangle (flash/viewfinder) -->
+        <path
+            android:fillColor="#1B1B1B"
+            android:pathData="M25,40
+                h28
+                a2,2 0 0 1 2,2
+                v2
+                a2,2 0 0 1 -2,2
+                h-28
+                a2,2 0 0 1 -2,-2
+                v-2
+                a2,2 0 0 1 2,-2
+                z" />
+
+    </group>
+</vector>

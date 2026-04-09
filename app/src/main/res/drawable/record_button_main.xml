@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="64dp"
+    android:height="64dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+
+    <!-- Red circle -->
+    <path
+        android:fillColor="#FF0000"
+        android:pathData="
+            M32,32
+            m-20,0
+            a20,20 0 1,0 40,0
+            a20,20 0 1,0 -40,0
+        " />
+
+    <!-- White ring (completely separate and larger) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.4"
+        android:pathData="
+            M32,32
+            m-26,0
+            a26,26 0 2,0 52,0
+            a26,26 0 2,0 -52,0
+        " />
+</vector>
