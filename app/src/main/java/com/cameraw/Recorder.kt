@@ -72,7 +72,8 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
         val isTrueHdr: Boolean,
         val sarNum: Int = 1,
         val sarDen: Int = 1,
-        val dynamicMetadataMode: Int = 1
+        val dynamicMetadataMode: Int = 1,
+        val orientationHint: Int = 0
     )
 
     var encoderSurface: Surface? = null
@@ -375,6 +376,7 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
     @SuppressLint("MissingPermission")
     private fun startPipelines() {
         muxer = MediaMuxer(tempMp4File!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        config?.orientationHint?.let { muxer?.setOrientationHint(it) }
         setupAudioRecord()
         startAudioThread()
         startVideoOutput()
