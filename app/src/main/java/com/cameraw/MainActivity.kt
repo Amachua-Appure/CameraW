@@ -1546,7 +1546,8 @@ class MainActivity : ComponentActivity() {
             isTrueHdr = (mode == CameraMode.PRO_VIDEO && state.videoFormat == 1),
             sarNum = sarN,
             sarDen = sarD,
-            dynamicMetadataMode = if (state.videoFormat == 1) state.dynamicMetadataMode else 0
+            dynamicMetadataMode = if (state.videoFormat == 1) state.dynamicMetadataMode else 0,
+            orientationHint = getJpegOrientation(currentOrientation)
         )
 
         if (mode != CameraMode.RAW_VIDEO) {
