@@ -21,6 +21,7 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sched.h>
+#include <cstdio>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavcodec/bsf.h>
@@ -80,13 +81,26 @@ private:
 
 static PFNEGLPRESENTATIONTIMEANDROIDPROC eglPresentationTimeANDROID = nullptr;
 
-static void pinThreadToPerformanceCores() {
+static void pinToFastestCores() {
     int numCores = sysconf(_SC_NPROCESSORS_CONF);
+    int maxFreq = 0;
+    std::vector<int> coreFreqs(numCores, 0);
+    for (int i = 0; i < numCores; ++i) {
+        char path[128];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+        FILE* f = fopen(path, "r");
+        if (f) {
+            fscanf(f, "%d", &coreFreqs[i]);
+            if (coreFreqs[i] > maxFreq) maxFreq = coreFreqs[i];
+            fclose(f);
+        }
+    }
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
-    int startCore = (numCores > 4) ? (numCores / 2) : 0;
-    for (int i = startCore; i < numCores; ++i) {
-        CPU_SET(i, &cpuset);
+    for (int i = 0; i < numCores; ++i) {
+        if (coreFreqs[i] >= maxFreq * 0.9) {
+            CPU_SET(i, &cpuset);
+        }
     }
     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
 }
@@ -356,6 +370,12 @@ struct GlesContext {
     JobQueue<RawJob> rawBufferQueue;
     int hdrMode = 0;
     int cfa = 0;
+
+    std::vector<uint8_t> maxRgbArray;
+    std::vector<uint8_t> hdr10p;
+    float smoothedAvgNits = 0.0f;
+    float smoothedMaxNits = 0.0f;
+    bool firstMetadata = true;
 };
 
 std::map<jlong, GlesContext*> g_contexts;
@@ -381,7 +401,7 @@ GLuint createProgram(const char* vSrc, const char* fSrc) {
 }
 
 void renderWorkerLoop(GlesContext* ctx) {
-    pinThreadToPerformanceCores();
+    pinToFastestCores();
     setpriority(PRIO_PROCESS, 0, -10);
     while (ctx->encoderSurface == EGL_NO_SURFACE) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -605,9 +625,13 @@ void renderWorkerLoop(GlesContext* ctx) {
                     uint8_t minPixel = 255, maxPixel = 255;
                     double sum_linear_nits = 0.0;
 
-                    std::vector<uint8_t> maxRgbArray;
                     if (ctx->hdrMode == 1) {
-                        maxRgbArray.resize(ctx->DOWNSCALE_SIZE * ctx->DOWNSCALE_SIZE);
+                        for (int i = 0; i < ctx->DOWNSCALE_SIZE * ctx->DOWNSCALE_SIZE; ++i) {
+                            uint8_t r = mappedPixels[i * 4 + 0];
+                            uint8_t g = mappedPixels[i * 4 + 1];
+                            uint8_t b = mappedPixels[i * 4 + 2];
+                            ctx->maxRgbArray[i] = std::max({r, g, b});
+                        }
                     }
 
                     for (int i = 0; i < ctx->DOWNSCALE_SIZE * ctx->DOWNSCALE_SIZE; ++i) {
@@ -627,27 +651,41 @@ void renderWorkerLoop(GlesContext* ctx) {
                             if (r > maxR) maxR = r;
                             if (g > maxG) maxG = g;
                             if (b > maxB) maxB = b;
-                            maxRgbArray[i] = pixelMax;
                         }
                     }
 
                     float true_avg_nits = static_cast<float>(sum_linear_nits / (ctx->DOWNSCALE_SIZE * ctx->DOWNSCALE_SIZE));
+                    if (ctx->firstMetadata) {
+                        ctx->smoothedAvgNits = true_avg_nits;
+                        ctx->smoothedMaxNits = pqToNits(maxPixel);
+                        ctx->firstMetadata = false;
+                    } else {
+                        ctx->smoothedAvgNits = (ctx->smoothedAvgNits * 0.8f) + (true_avg_nits * 0.2f);
+                        float currentMaxNits = pqToNits(maxPixel);
+                        if (currentMaxNits > ctx->smoothedMaxNits) {
+                            ctx->smoothedMaxNits = currentMaxNits;
+                        } else {
+                            ctx->smoothedMaxNits = (ctx->smoothedMaxNits * 0.95f) + (currentMaxNits * 0.05f);
+                        }
+                    }
+                    float avgNitsForMetadata = ctx->smoothedAvgNits;
+                    float maxNitsForMetadata = ctx->smoothedMaxNits;
+
                     std::vector<uint8_t> hdr10p;
                     uint32_t dvMinPq = 0, dvMaxPq = 0, dvAvgPq = 0;
 
                     if (ctx->hdrMode == 2) {
                         dvMinPq = get12BitPq(minPixel);
                         dvMaxPq = get12BitPq(maxPixel);
-                        dvAvgPq = nitsTo12BitPq(true_avg_nits);
+                        dvAvgPq = nitsTo12BitPq(avgNitsForMetadata);
                     } else if (ctx->hdrMode == 1) {
                         uint32_t msR = static_cast<uint32_t>(pqToNits(maxR) * 10.0f);
                         uint32_t msG = static_cast<uint32_t>(pqToNits(maxG) * 10.0f);
                         uint32_t msB = static_cast<uint32_t>(pqToNits(maxB) * 10.0f);
-                        uint32_t avgRgb17 = static_cast<uint32_t>(true_avg_nits * 10.0f);
+                        uint32_t avgRgb17 = static_cast<uint32_t>(avgNitsForMetadata * 10.0f);
 
-                        std::sort(maxRgbArray.begin(), maxRgbArray.end());
+                        std::sort(ctx->maxRgbArray.begin(), ctx->maxRgbArray.end());
                         BitWriter bw;
-
                         bw.write(0xB5, 8); bw.write(0x00, 8); bw.write(0x3C, 8);
                         bw.write(0x00, 8); bw.write(0x01, 8); bw.write(0x04, 8); bw.write(0x01, 8);
                         bw.write(1, 2); bw.write(0, 27); bw.write(0, 1);
@@ -657,14 +695,15 @@ void renderWorkerLoop(GlesContext* ctx) {
                         int percentiles[9] = {1, 5, 10, 25, 50, 75, 90, 95, 99};
                         for (int i = 0; i < 9; i++) {
                             bw.write(percentiles[i], 7);
-                            int idx = static_cast<int>(maxRgbArray.size() * (percentiles[i] / 100.0f));
-                            if (idx >= maxRgbArray.size()) idx = maxRgbArray.size() - 1;
-                            uint32_t pNits = static_cast<uint32_t>(pqToNits(maxRgbArray[idx]) * 10.0f);
+                            int idx = static_cast<int>(ctx->maxRgbArray.size() * (percentiles[i] / 100.0f));
+                            if (idx >= ctx->maxRgbArray.size()) idx = ctx->maxRgbArray.size() - 1;
+                            uint32_t pNits = static_cast<uint32_t>(pqToNits(ctx->maxRgbArray[idx]) * 10.0f);
                             bw.write(pNits, 17);
                         }
                         bw.write(0, 10); bw.write(0, 1); bw.write(0, 1); bw.write(0, 1);
                         bw.flush();
-                        hdr10p = bw.data;
+                        ctx->hdr10p = bw.data;
+                        hdr10p = ctx->hdr10p;
                     }
 
                     glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
@@ -727,6 +766,9 @@ Java_com_cameraw_VulkanHdrBridge_nativeCreate(JNIEnv* env, jobject thiz,
     ctx->isRunning = true;
     ctx->hdrMode = hdrMode;
     ctx->cfa = cfa;
+    ctx->maxRgbArray.resize(ctx->DOWNSCALE_SIZE * ctx->DOWNSCALE_SIZE);
+    ctx->hdr10p.reserve(1024);
+    ctx->firstMetadata = true;
 
     ctx->kotlinBridgeObj = env->NewGlobalRef(thiz);
     jclass clazz = env->GetObjectClass(thiz);
@@ -908,6 +950,7 @@ Java_com_cameraw_VulkanHdrBridge_nativeRemuxVideo(JNIEnv* env, jclass clazz,
 
         ret = avcodec_parameters_copy(out_stream->codecpar, in_stream->codecpar);
         if (ret < 0) goto end;
+        av_dict_copy(&out_stream->metadata, in_stream->metadata, 0);
 
         if (out_stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             video_stream_index = i;
