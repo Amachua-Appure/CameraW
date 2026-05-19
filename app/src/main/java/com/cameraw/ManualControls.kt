@@ -36,85 +36,47 @@ object CameraProUtils {
     )
 
     val SHUTTER_STOPS_NS = listOf(
-        32_000_000_000L,   // 32s
-        30_000_000_000L,   // 30s
-        25_000_000_000L,   // 25s
-        20_000_000_000L,   // 20s
-        15_000_000_000L,   // 15s
-        13_000_000_000L,   // 13s
-        10_000_000_000L,   // 10s
-        8_000_000_000L,    // 8s
-        6_000_000_000L,    // 6s
-        5_000_000_000L,    // 5s
-        4_000_000_000L,    // 4s
-        3_200_000_000L,    // 3.2s
-        3_000_000_000L,    // 3s
-        2_500_000_000L,    // 2.5s
-        2_000_000_000L,    // 2s
-        1_600_000_000L,    // 1.6s
-        1_300_000_000L,    // 1.3s
-        1_000_000_000L,    // 1s
-        800_000_000L,      // 0.8s
-        600_000_000L,      // 0.6s
-        500_000_000L,      // 0.5s (1/2)
-        400_000_000L,      // 0.4s
-        333_333_333L,      // 1/3s
-        300_000_000L,      // 0.3s
-        250_000_000L,      // 1/4s
-        200_000_000L,      // 1/5s
-        166_666_666L,      // 1/6s
-        125_000_000L,      // 1/8s
-        100_000_000L,      // 1/10s
-        76_923_076L,       // 1/13s
-        66_666_666L,       // 1/15s
-        50_000_000L,       // 1/20s
-        40_000_000L,       // 1/25s
-        33_333_333L,       // 1/30s
-        25_000_000L,       // 1/40s
-        20_000_000L,       // 1/50s
-        16_666_666L,       // 1/60s
-        12_500_000L,       // 1/80s
-        10_000_000L,       // 1/100s
-        8_000_000L,        // 1/125s
-        6_250_000L,        // 1/160s
-        5_000_000L,        // 1/200s
-        4_000_000L,        // 1/250s
-        3_125_000L,        // 1/320s
-        2_500_000L,        // 1/400s
-        2_000_000L,        // 1/500s
-        1_562_500L,        // 1/640s
-        1_250_000L,        // 1/800s
-        1_000_000L,        // 1/1000s
-        800_000L,          // 1/1250s
-        625_000L,          // 1/1600s
-        500_000L,          // 1/2000s
-        400_000L,          // 1/2500s
-        312_500L,          // 1/3200s
-        250_000L,          // 1/4000s
-        125_000L,          // 1/8000s
-        62_500L,           // 1/16000s
-        31_250L            // 1/32000s
+        32_000_000_000L, 30_000_000_000L, 25_000_000_000L, 20_000_000_000L,
+        15_000_000_000L, 13_000_000_000L, 10_000_000_000L, 8_000_000_000L,
+        6_000_000_000L, 5_000_000_000L, 4_000_000_000L, 3_200_000_000L,
+        3_000_000_000L, 2_500_000_000L, 2_000_000_000L, 1_600_000_000L,
+        1_300_000_000L, 1_000_000_000L, 800_000_000L, 600_000_000L,
+        500_000_000L, 400_000_000L, 333_333_333L, 300_000_000L,
+        250_000_000L, 200_000_000L, 166_666_666L, 125_000_000L,
+        100_000_000L, 76_923_076L, 66_666_666L, 50_000_000L,
+        40_000_000L, 33_333_333L, 25_000_000L, 20_000_000L,
+        16_666_666L, 12_500_000L, 10_000_000L, 8_000_000L,
+        6_250_000L, 5_000_000L, 4_000_000L, 3_125_000L,
+        2_500_000L, 2_000_000L, 1_562_500L, 1_250_000L,
+        1_000_000L, 800_000L, 625_000L, 500_000L,
+        400_000L, 312_500L, 250_000L, 125_000L,
+        62_500L, 31_250L
     )
 
+    fun getDynamicShutterList(
+        currentFps: Int,
+        minNs: Long,
+        maxNs: Long,
+        isVideoMode: Boolean
+    ): List<Long> {
+        if (currentFps <= 0) return SHUTTER_STOPS_NS.filter { it in minNs..maxNs }
 
-    fun getDynamicShutterList(currentFps: Int, minNs: Long, maxNs: Long): List<Long> {
-        if (currentFps <= 0) return SHUTTER_STOPS_NS
         val cinematic180 = 1_000_000_000L / (currentFps * 2)
         val cinematic360 = 1_000_000_000L / currentFps
         val flicker50Hz = 1_000_000_000L / 50
         val flicker60Hz = 1_000_000_000L / 60
         val flicker120Hz = 1_000_000_000L / 120
 
-        val combined = SHUTTER_STOPS_NS +
-                listOf(cinematic180, cinematic360, flicker50Hz, flicker60Hz, flicker120Hz)
+        val combined = SHUTTER_STOPS_NS + listOf(cinematic180, cinematic360, flicker50Hz, flicker60Hz, flicker120Hz)
 
-        val maxDuration = 1_000_000_000L / currentFps
+        var filtered = combined.filter { it in minNs..maxNs }
 
-        return combined
-            .filter { it in minNs..maxNs }
-            .filter { it <= maxDuration }
-            .distinct()
-            .sortedDescending()
+        if (isVideoMode) {
+            val maxDuration = 1_000_000_000L / currentFps
+            filtered = filtered.filter { it <= maxDuration }
+        }
+
+        return filtered.distinct().sortedDescending()
     }
 }
 
@@ -333,8 +295,14 @@ fun CompactControlRow(
                 }
                 ManualControlType.SHUTTER -> {
                     val minNs = state.minShutter.coerceAtLeast(1L).toDouble()
-                    val maxDuration = 1_000_000_000L / (if (state.currentFps > 0) state.currentFps else 30)
-                    val maxNs = state.maxShutter.coerceAtMost(maxDuration).toDouble()
+                    val isVideo = state.isVideoMode
+
+                    val maxNs = if (isVideo && state.currentFps > 0) {
+                        val maxDuration = 1_000_000_000L / state.currentFps
+                        state.maxShutter.coerceAtMost(maxDuration).toDouble()
+                    } else {
+                        state.maxShutter.toDouble()
+                    }
 
                     val logMin = Math.log(minNs)
                     val logMax = Math.log(maxNs)
@@ -342,7 +310,12 @@ fun CompactControlRow(
                     val currentNs = (state.manualShutterNano ?: state.activeShutter).toDouble().coerceIn(minNs, maxNs)
                     val initialPos = if (logMax <= logMin) 0f else (((logMax - Math.log(currentNs)) / (logMax - logMin)) * 1000f).toFloat()
 
-                    val steps = CameraProUtils.getDynamicShutterList(state.currentFps, state.minShutter, state.maxShutter)
+                    val steps = CameraProUtils.getDynamicShutterList(
+                        currentFps = state.currentFps,
+                        minNs = state.minShutter,
+                        maxNs = state.maxShutter,
+                        isVideoMode = isVideo
+                    )
 
                     SliderWithFastSteps(
                         onStepDown = {
@@ -497,7 +470,6 @@ fun ContinuousSlider(
         formatLabel = { formatLabel(it) }
     )
 }
-
 
 private fun formatShutter(nano: Long?): String {
     if (nano == null || nano == 0L) return "Auto"
