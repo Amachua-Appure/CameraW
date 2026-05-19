@@ -772,50 +772,127 @@ class MainActivity : ComponentActivity() {
         val surface = textureViewSurface ?: return
         val mode = viewModel.uiState.value.cameraMode
 
-        if (histogramReader == null) {
-            histogramReader = ImageReader.newInstance(256, 144, ImageFormat.YUV_420_888, 2)
-            histogramThread = HandlerThread("Histogram").also { it.start() }
-            histogramHandler = Handler(histogramThread!!.looper)
+        val currentRes = viewModel.uiState.value.currentResolution
+        val targetRatio = currentRes.width.toFloat() / currentRes.height.toFloat()
+
+        val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val chars = manager.getCameraCharacteristics(cameraId)
+        val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val yuvSizes = map?.getOutputSizes(ImageFormat.YUV_420_888) ?: emptyArray()
+
+        val matchingSizes = yuvSizes.filter {
+            Math.abs(it.width.toFloat() / it.height.toFloat() - targetRatio) < 0.05f
+        }.sortedBy { it.width * it.height }
+
+        val bestSize = matchingSizes.firstOrNull { it.width >= 256 }
+            ?: matchingSizes.lastOrNull()
+            ?: Size(320, (320 / targetRatio).toInt().let { if (it % 2 != 0) it + 1 else it })
+
+        val histW = bestSize.width
+        val histH = bestSize.height
+
+        if (histogramReader == null || histogramReader?.width != histW || histogramReader?.height != histH) {
+            histogramReader?.close()
+            histogramReader = ImageReader.newInstance(histW, histH, ImageFormat.YUV_420_888, 2)
+
+            if (histogramThread == null) {
+                histogramThread = HandlerThread("Histogram").also { it.start() }
+                histogramHandler = Handler(histogramThread!!.looper)
+            }
 
             histogramReader!!.setOnImageAvailableListener({ reader ->
                 val image = try { reader.acquireLatestImage() } catch (e: Exception) { null }
                 image?.use { img ->
-                    val planes = img.planes
-                    if (planes.isNotEmpty()) {
-                        val buffer = planes[0].buffer
-                        val limit = buffer.limit()
-                        val bytes = ByteArray(limit)
-                        buffer.get(bytes)
+                    try {
+                        val planes = img.planes
+                        if (planes.isNotEmpty()) {
+                            val yPlane = planes[0]
+                            val buffer = yPlane.buffer
+                            val rowStride = yPlane.rowStride
+                            val width = img.width
+                            val height = img.height
 
-                        val bins = FloatArray(256)
-                        val step = 4
-                        var totalSamples = 0
+                            val bytes = ByteArray(buffer.remaining())
+                            buffer.get(bytes)
 
-                        for (i in 0 until limit step step) {
-                            val luma = bytes[i].toInt() and 0xFF
-                            bins[luma]++
-                            totalSamples++
+                            val bins = FloatArray(256)
+                            var totalSamples = 0
+
+                            val showClipping = viewModel.uiState.value.showClippingWarning && !isRecording
+                            var hasClipping = false
+                            var maskPixels: IntArray? = if (showClipping) IntArray(width * height) else null
+
+                            val orangeZebra = 0xFFFF9800.toInt()
+                            val purpleZebra = 0xFF9C27B0.toInt()
+                            val transparent = 0x00000000
+                            val density = (width / 64).coerceAtLeast(1)
+
+                            for (row in 0 until height) {
+                                for (col in 0 until width) {
+                                    val idx = row * rowStride + col
+                                    if (idx >= bytes.size) break
+                                    val luma = bytes[idx].toInt() and 0xFF
+
+                                    bins[luma]++
+                                    totalSamples++
+
+                                    if (showClipping && maskPixels != null) {
+                                        val pixelIndex = row * width + col
+                                        val isZebra = (((row + col) / density) and 1) == 0
+
+                                        if (luma >= 245) {
+                                            maskPixels[pixelIndex] = if (isZebra) orangeZebra else transparent
+                                            hasClipping = true
+                                        } else if (luma <= 10) {
+                                            maskPixels[pixelIndex] = if (isZebra) purpleZebra else transparent
+                                            hasClipping = true
+                                        } else {
+                                            maskPixels[pixelIndex] = transparent
+                                        }
+                                    }
+                                }
+                            }
+
+                            val smoothingFactor = 0.3f
+                            val visualGain = 50.0f
+                            val normFactor = if (totalSamples > 0) visualGain / totalSamples else 0f
+                            val finalData = FloatArray(256)
+
+                            for (i in bins.indices) {
+                                val rawVal = bins[i] * normFactor
+                                finalData[i] = (previousHistogramBins[i] * (1 - smoothingFactor)) + (rawVal * smoothingFactor)
+                            }
+                            previousHistogramBins = finalData
+                            runOnUiThread { viewModel.onEvent(CameraUiEvent.UpdateHistogram(finalData)) }
+
+                            if (showClipping && hasClipping) {
+                                val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                                bitmap.setPixels(maskPixels!!, 0, width, 0, 0, width, height)
+
+                                val matrix = android.graphics.Matrix()
+
+                                if (isFrontCamera) {
+                                    matrix.postScale(-1f, 1f)
+                                    val frontRotation = (360 - sensorOrientation) % 360
+                                    matrix.postRotate(frontRotation.toFloat())
+                                } else {
+                                    matrix.postRotate(sensorOrientation.toFloat())
+                                }
+
+                                val rotatedBitmap = android.graphics.Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, false)
+                                runOnUiThread { viewModel.onEvent(CameraUiEvent.UpdateClippingMask(rotatedBitmap)) }
+                            } else if (viewModel.uiState.value.clippingMask != null) {
+                                runOnUiThread { viewModel.onEvent(CameraUiEvent.UpdateClippingMask(null)) }
+                            }
                         }
-
-                        val smoothingFactor = 0.3f
-                        val visualGain = 50.0f
-                        val normFactor = if (totalSamples > 0) visualGain / totalSamples else 0f
-
-                        val finalData = FloatArray(256)
-                        for (i in bins.indices) {
-                            val rawVal = bins[i] * normFactor
-                            finalData[i] = (previousHistogramBins[i] * (1 - smoothingFactor)) + (rawVal * smoothingFactor)
-                        }
-
-                        previousHistogramBins = finalData
-                        runOnUiThread { viewModel.onEvent(CameraUiEvent.UpdateHistogram(finalData)) }
+                    } catch (e: IllegalStateException) {
+                        return@use
                     }
                 }
             }, histogramHandler)
         }
 
         val bitDepth = viewModel.uiState.value.photoBitDepth
-        val currentRes = viewModel.uiState.value.currentResolution
         val is50Mp = (currentRes.width == 8192 && currentRes.height == 6144) ||
                 (currentRes.width == 4640 && currentRes.height == 3488)
 
@@ -1997,35 +2074,56 @@ class MainActivity : ComponentActivity() {
             stateCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
-                    val builder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-                    builder.addTarget(textureViewSurface!!)
-                    builder.addTarget(rawSurface)
+                    val warmupBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                    warmupBuilder.addTarget(textureViewSurface!!)
 
-                    builder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
+                    applyManualControls(warmupBuilder)
 
-                    val targetFps = state.currentFps
-                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(targetFps, targetFps))
-                    builder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / targetFps)
-                    builder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
-                    builder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
-                    builder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_OFF)
-                    builder.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+                    if (hasUltraHighRes) warmupBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                    warmupBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+                    warmupBuilder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+                    warmupBuilder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_OFF)
+                    warmupBuilder.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
 
-                    applyManualControls(builder)
-
-                    if (hasUltraHighRes) builder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
-
-                    activeRequestBuilder = builder
-                    activeRequestSession = session
-
-                    session.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
-
+                    session.setRepeatingRequest(warmupBuilder.build(), captureCallback, backgroundHandler)
                     isRecording = true
-                    recordingStartTime = System.currentTimeMillis()
-                    timerHandler.post(timerRunnable)
-                    viewModel.onEvent(CameraUiEvent.RecordingStarted)
-                }
 
+                    backgroundHandler?.postDelayed({
+                        if (!isRecording) return@postDelayed
+
+                        try {
+                            val recordBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+                            recordBuilder.addTarget(textureViewSurface!!)
+                            recordBuilder.addTarget(rawSurface)
+
+                            val targetFps = state.currentFps
+                            recordBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(targetFps, targetFps))
+                            recordBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / targetFps)
+                            recordBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
+
+                            applyManualControls(recordBuilder)
+
+                            if (hasUltraHighRes) recordBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                            recordBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+                            recordBuilder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+                            recordBuilder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_OFF)
+                            recordBuilder.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+
+                            activeRequestBuilder = recordBuilder
+                            activeRequestSession = session
+
+                            session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
+
+                            recordingStartTime = System.currentTimeMillis()
+                            timerHandler.post(timerRunnable)
+                            viewModel.onEvent(CameraUiEvent.RecordingStarted)
+
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to swap to Pro Video record state", e)
+                            stopRecordingInternal()
+                        }
+                    }, 300)
+                }
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     stopRecordingInternal()
                 }
