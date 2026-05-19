@@ -11,6 +11,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Gradient
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.outlined.FlipCameraAndroid
 import androidx.compose.material.icons.outlined.PhotoLibrary
@@ -45,9 +46,11 @@ fun ExpressiveBottomBar(
     onSwitchCameraClick: () -> Unit,
     showHistogram: Boolean,
     onHistogramClick: () -> Unit,
+    showClippingWarning: Boolean,
+    onClippingWarningClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val sakuraPink = Color(0xFFFFB7C5)
+    val sakuraPink = Color(0xFFFFD700)
 
     Box(
         modifier = modifier
@@ -78,45 +81,61 @@ fun ExpressiveBottomBar(
                 Spacer(modifier = Modifier.height(60.dp))
             }
 
-            Box(
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 32.dp),
-                contentAlignment = Alignment.Center
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 if (!isRecording) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .size(56.dp)
+                            .size(52.dp)
                             .clip(CircleShape)
-                            .background(Color.Transparent)
+                            .background(Color(0xFF1A1A1A))
                             .clickable { onGalleryClick() },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.PhotoLibrary,
                             contentDescription = "Gallery",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
+                            tint = sakuraPink,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
-                }
+                } else Spacer(modifier = Modifier.size(52.dp))
+
+                if (!isRecording) {
+                    Box(
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(CircleShape)
+                            .background(if (showClippingWarning) MaterialTheme.colorScheme.primaryContainer else Color(0xFF1A1A1A))
+                            .clickable { onClippingWarningClick() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Gradient,
+                            contentDescription = "Clipping Warning",
+                            tint = if (showClippingWarning) MaterialTheme.colorScheme.onPrimaryContainer else sakuraPink,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                } else Spacer(modifier = Modifier.size(52.dp))
+
                 ExpressiveRecordButton(
                     isRecording = isRecording,
                     onClick = onRecordClick,
-                    size = 90.dp,
-                    modifier = Modifier.align(Alignment.Center)
+                    size = 80.dp
                 )
 
                 if (!isRecording) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.Center)
-                            .offset(x = 98.dp)
-                            .size(48.dp)
+                            .size(52.dp)
                             .clip(CircleShape)
-                            .background(Color.Transparent)
+                            .background(Color(0xFF1A1A1A))
                             .clickable { onSwitchCameraClick() },
                         contentAlignment = Alignment.Center
                     ) {
@@ -127,32 +146,31 @@ fun ExpressiveBottomBar(
                         Icon(
                             imageVector = Icons.Outlined.FlipCameraAndroid,
                             contentDescription = "Switch Camera",
-                            tint = Color.White,
+                            tint = sakuraPink,
                             modifier = Modifier
                                 .size(24.dp)
                                 .rotate(rotation)
                         )
                     }
-                }
+                } else Spacer(modifier = Modifier.size(52.dp))
 
                 if (!isRecording) {
                     Box(
                         modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .size(56.dp)
+                            .size(52.dp)
                             .clip(CircleShape)
-                            .background(if (showHistogram) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                            .background(if (showHistogram) MaterialTheme.colorScheme.primaryContainer else Color(0xFF1A1A1A))
                             .clickable { onHistogramClick() },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.BarChart,
                             contentDescription = "Histogram",
-                            tint = if (showHistogram) MaterialTheme.colorScheme.onPrimaryContainer else Color.White,
-                            modifier = Modifier.size(28.dp)
+                            tint = if (showHistogram) MaterialTheme.colorScheme.onPrimaryContainer else sakuraPink,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
-                }
+                } else Spacer(modifier = Modifier.size(52.dp))
             }
         }
     }
