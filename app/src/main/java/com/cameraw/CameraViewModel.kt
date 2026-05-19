@@ -1,6 +1,7 @@
 package com.cameraw
 
 import android.content.SharedPreferences
+import android.graphics.Bitmap
 import android.util.Range
 import android.util.Size
 import androidx.compose.ui.geometry.Offset
@@ -35,7 +36,7 @@ private val CINEMATIC_RESOLUTIONS = listOf(
     Size(3840, 2176),
     Size(3840, 2160),
     Size(3840, 2074),
-    Size(3840, 2020),
+    Size(3840, 2026),
     Size(3840, 1920),
     Size(3840, 1634),
     Size(3840, 1608),
@@ -73,7 +74,7 @@ private val FRONT_CINEMATIC_RESOLUTIONS = listOf(
     Size(3840, 2176),
     Size(3840, 2160),
     Size(3840, 2074),
-    Size(3840, 2020),
+    Size(3840, 2026),
     Size(3840, 1920),
     Size(3840, 1634),
     Size(3840, 1608),
@@ -158,6 +159,9 @@ sealed class CameraUiEvent {
     data class UpdateFocusState(val state: FocusState) : CameraUiEvent()
     data class SetExposureCompensation(val step: Int) : CameraUiEvent()
     object ResumeContinuousFocus : CameraUiEvent()
+
+    object ToggleClippingWarning : CameraUiEvent()
+    data class UpdateClippingMask(val mask: Bitmap?) : CameraUiEvent()
 }
 
 data class CameraUiState(
@@ -214,6 +218,9 @@ data class CameraUiState(
 
     val focusState: FocusState = FocusState.IDLE,
     val exposureCompensation: Int = 0,
+
+    val showClippingWarning: Boolean = false,
+    val clippingMask: Bitmap? = null,
 )
 
 class CameraViewModel : ViewModel() {
@@ -594,6 +601,12 @@ class CameraViewModel : ViewModel() {
             }
             is CameraUiEvent.ResumeContinuousFocus -> _uiState.update {
                 it.copy(focusPoint = null, showFocusCircle = false, focusState = FocusState.IDLE)
+            }
+            is CameraUiEvent.ToggleClippingWarning -> _uiState.update {
+                it.copy(showClippingWarning = !it.showClippingWarning)
+            }
+            is CameraUiEvent.UpdateClippingMask -> _uiState.update {
+                it.copy(clippingMask = event.mask)
             }
 
             else -> {}
