@@ -25,24 +25,77 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import com.cameraw.InfiniteRulerDial
 
 enum class ManualControlType { ISO, SHUTTER, FOCUS, WB }
 
 object CameraProUtils {
     val ISO_STOPS = listOf(
-        50, 64, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640,
+        50, 64, 72, 80, 100, 125, 160, 200, 250, 320, 400, 500, 640,
         800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 12800
     )
 
     val SHUTTER_STOPS_NS = listOf(
-        32_000_000_000L, 15_000_000_000L, 10_000_000_000L, 8_000_000_000L, 6_000_000_000L,
-        5_000_000_000L, 4_000_000_000L, 3_000_000_000L, 2_000_000_000L,
-        1_000_000_000L, 500_000_000L, 250_000_000L, 125_000_000L,
-        100_000_000L, 66_666_666L, 50_000_000L, 40_000_000L, 33_333_333L,
-        25_000_000L, 20_000_000L, 16_666_666L, 12_500_000L, 10_000_000L,
-        8_000_000L, 5_000_000L, 4_000_000L, 2_000_000L, 1_000_000L,
-        500_000L, 250_000L, 125_000L, 62_500L
+        32_000_000_000L,   // 32s
+        30_000_000_000L,   // 30s
+        25_000_000_000L,   // 25s
+        20_000_000_000L,   // 20s
+        15_000_000_000L,   // 15s
+        13_000_000_000L,   // 13s
+        10_000_000_000L,   // 10s
+        8_000_000_000L,    // 8s
+        6_000_000_000L,    // 6s
+        5_000_000_000L,    // 5s
+        4_000_000_000L,    // 4s
+        3_200_000_000L,    // 3.2s
+        3_000_000_000L,    // 3s
+        2_500_000_000L,    // 2.5s
+        2_000_000_000L,    // 2s
+        1_600_000_000L,    // 1.6s
+        1_300_000_000L,    // 1.3s
+        1_000_000_000L,    // 1s
+        800_000_000L,      // 0.8s
+        600_000_000L,      // 0.6s
+        500_000_000L,      // 0.5s (1/2)
+        400_000_000L,      // 0.4s
+        333_333_333L,      // 1/3s
+        300_000_000L,      // 0.3s
+        250_000_000L,      // 1/4s
+        200_000_000L,      // 1/5s
+        166_666_666L,      // 1/6s
+        125_000_000L,      // 1/8s
+        100_000_000L,      // 1/10s
+        76_923_076L,       // 1/13s
+        66_666_666L,       // 1/15s
+        50_000_000L,       // 1/20s
+        40_000_000L,       // 1/25s
+        33_333_333L,       // 1/30s
+        25_000_000L,       // 1/40s
+        20_000_000L,       // 1/50s
+        16_666_666L,       // 1/60s
+        12_500_000L,       // 1/80s
+        10_000_000L,       // 1/100s
+        8_000_000L,        // 1/125s
+        6_250_000L,        // 1/160s
+        5_000_000L,        // 1/200s
+        4_000_000L,        // 1/250s
+        3_125_000L,        // 1/320s
+        2_500_000L,        // 1/400s
+        2_000_000L,        // 1/500s
+        1_562_500L,        // 1/640s
+        1_250_000L,        // 1/800s
+        1_000_000L,        // 1/1000s
+        800_000L,          // 1/1250s
+        625_000L,          // 1/1600s
+        500_000L,          // 1/2000s
+        400_000L,          // 1/2500s
+        312_500L,          // 1/3200s
+        250_000L,          // 1/4000s
+        125_000L,          // 1/8000s
+        62_500L,           // 1/16000s
+        31_250L            // 1/32000s
     )
+
 
     fun getDynamicShutterList(currentFps: Int, minNs: Long, maxNs: Long): List<Long> {
         if (currentFps <= 0) return SHUTTER_STOPS_NS
@@ -220,9 +273,9 @@ fun CompactControlRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(24.dp))
             .background(Color.Black.copy(alpha = 0.5f))
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Button(
             onClick = {
@@ -247,73 +300,136 @@ fun CompactControlRow(
         Box(modifier = Modifier.weight(1f)) {
             when (type) {
                 ManualControlType.ISO -> {
-                    val steps = remember(state.minIso, state.maxIso) {
-                        CameraProUtils.ISO_STOPS.filter { it in state.minIso..state.maxIso }
-                            .ifEmpty { listOf(state.minIso) }
-                    }
-                    val current = state.manualIso ?: state.currentISO
-                    val initialIndex = steps.indexOfFirst { it >= current }.coerceAtLeast(0)
+                    val min = state.minIso.toFloat()
+                    val max = state.maxIso.toFloat()
+                    val current = (state.manualIso ?: state.activeIso).toFloat().coerceIn(min, max)
+                    val initialPos = if (max <= min) 0f else ((current - min) / (max - min)) * 1000f
 
-                    CompactSlider(
-                        value = initialIndex,
-                        steps = steps.size,
-                        labelMapper = { steps[it].toString() },
-                        minLabel = "${steps.first()}",
-                        maxLabel = "${steps.last()}",
-                        onValueChange = { idx -> onEvent(CameraUiEvent.SetManualIso(steps[idx])) }
-                    )
+                    val steps = CameraProUtils.ISO_STOPS.filter { it in state.minIso..state.maxIso }.sorted()
+
+                    SliderWithFastSteps(
+                        onStepDown = {
+                            val next = steps.lastOrNull { it < current.roundToInt() } ?: state.minIso
+                            onEvent(CameraUiEvent.SetManualIso(next))
+                        },
+                        onStepUp = {
+                            val next = steps.firstOrNull { it > current.roundToInt() } ?: state.maxIso
+                            onEvent(CameraUiEvent.SetManualIso(next))
+                        }
+                    ) {
+                        ContinuousSlider(
+                            initialPosition = initialPos,
+                            sensitivity = 1.0f,
+                            formatLabel = { pos ->
+                                val iso = (min + (pos / 1000f) * (max - min)).roundToInt()
+                                "ISO $iso"
+                            },
+                            onValueChange = { pos ->
+                                val iso = (min + (pos / 1000f) * (max - min)).roundToInt()
+                                onEvent(CameraUiEvent.SetManualIso(iso))
+                            }
+                        )
+                    }
                 }
                 ManualControlType.SHUTTER -> {
-                    val steps = remember(state.minShutter, state.maxShutter, state.currentFps) {
-                        CameraProUtils.getDynamicShutterList(
-                            currentFps = state.currentFps,
-                            minNs = state.minShutter,
-                            maxNs = state.maxShutter
-                        ).ifEmpty { listOf(16_666_666L) }
-                    }
-                    val current = state.manualShutterNano ?: 16_666_666L
-                    val initialIndex = steps.indices.minByOrNull { abs(steps[it] - current) } ?: 0
+                    val minNs = state.minShutter.coerceAtLeast(1L).toDouble()
+                    val maxDuration = 1_000_000_000L / (if (state.currentFps > 0) state.currentFps else 30)
+                    val maxNs = state.maxShutter.coerceAtMost(maxDuration).toDouble()
 
-                    CompactSlider(
-                        value = initialIndex,
-                        steps = steps.size,
-                        labelMapper = { formatShutter(steps[it]) },
-                        minLabel = formatShutter(steps.first()),
-                        maxLabel = formatShutter(steps.last()),
-                        onValueChange = { idx -> onEvent(CameraUiEvent.SetShutterSpeed(steps[idx])) }
-                    )
+                    val logMin = Math.log(minNs)
+                    val logMax = Math.log(maxNs)
+
+                    val currentNs = (state.manualShutterNano ?: state.activeShutter).toDouble().coerceIn(minNs, maxNs)
+                    val initialPos = if (logMax <= logMin) 0f else (((logMax - Math.log(currentNs)) / (logMax - logMin)) * 1000f).toFloat()
+
+                    val steps = CameraProUtils.getDynamicShutterList(state.currentFps, state.minShutter, state.maxShutter)
+
+                    SliderWithFastSteps(
+                        onStepDown = {
+                            val next = steps.lastOrNull { it > currentNs.toLong() } ?: maxNs.toLong()
+                            onEvent(CameraUiEvent.SetShutterSpeed(next))
+                        },
+                        onStepUp = {
+                            val next = steps.firstOrNull { it < currentNs.toLong() } ?: minNs.toLong()
+                            onEvent(CameraUiEvent.SetShutterSpeed(next))
+                        }
+                    ) {
+                        ContinuousSlider(
+                            initialPosition = initialPos,
+                            sensitivity = 1.0f,
+                            formatLabel = { pos ->
+                                val logVal = logMax - (pos / 1000f) * (logMax - logMin)
+                                val ns = Math.exp(logVal).toLong()
+                                formatShutter(ns)
+                            },
+                            onValueChange = { pos ->
+                                val logVal = logMax - (pos / 1000f) * (logMax - logMin)
+                                val ns = Math.exp(logVal).toLong()
+                                onEvent(CameraUiEvent.SetShutterSpeed(ns))
+                            }
+                        )
+                    }
                 }
                 ManualControlType.WB -> {
-                    val steps = (2000..10000 step 100).toList()
-                    val current = state.manualWbTemp ?: 5500
-                    val initialIndex = steps.indexOfFirst { it >= current }.coerceAtLeast(0)
+                    val current = (state.manualWbTemp ?: state.activeWb).toFloat().coerceIn(2000f, 10000f)
+                    val initialPos = ((current - 2000f) / 8000f) * 1000f
+                    val steps = (2000..10000 step 500).toList()
 
-                    CompactSlider(
-                        value = initialIndex,
-                        steps = steps.size,
-                        labelMapper = { "${steps[it]}K" },
-                        minLabel = "2000K",
-                        maxLabel = "10000K",
-                        onValueChange = { idx -> onEvent(CameraUiEvent.SetWhiteBalance(steps[idx])) }
-                    )
+                    SliderWithFastSteps(
+                        onStepDown = {
+                            val next = steps.lastOrNull { it < current.roundToInt() } ?: 2000
+                            onEvent(CameraUiEvent.SetWhiteBalance(next))
+                        },
+                        onStepUp = {
+                            val next = steps.firstOrNull { it > current.roundToInt() } ?: 10000
+                            onEvent(CameraUiEvent.SetWhiteBalance(next))
+                        }
+                    ) {
+                        ContinuousSlider(
+                            initialPosition = initialPos,
+                            sensitivity = 1.2f,
+                            formatLabel = { pos ->
+                                val wb = (2000f + (pos / 1000f) * 8000f).roundToInt()
+                                "${wb}K"
+                            },
+                            onValueChange = { pos ->
+                                val wb = (2000f + (pos / 1000f) * 8000f).roundToInt()
+                                onEvent(CameraUiEvent.SetWhiteBalance(wb))
+                            }
+                        )
+                    }
                 }
                 ManualControlType.FOCUS -> {
                     val max = state.maxFocusDist
-                    val steps = 100
-                    val current = state.manualFocusDist ?: 0f
-                    val initialIndex = ((current / max) * 100).toInt().coerceIn(0, 100)
+                    val current = (state.manualFocusDist ?: state.activeFocusDist).coerceIn(0f, max)
+                    val initialPos = if (max <= 0f) 0f else ((max - current) / max) * 1000f
+                    val stepSize = max / 10f
 
-                    CompactSlider(
-                        value = initialIndex,
-                        steps = 101,
-                        labelMapper = { String.format("%.1f", (it / 100f) * max) },
-                        minLabel = "Inf",
-                        maxLabel = "Macro",
-                        onValueChange = { idx ->
-                            val dist = (idx / 100f) * max
-                            onEvent(CameraUiEvent.SetFocusDistance(dist))
+                    SliderWithFastSteps(
+                        onStepDown = {
+                            val next = (current + stepSize).coerceAtMost(max)
+                            onEvent(CameraUiEvent.SetFocusDistance(next))
+                        },
+                        onStepUp = {
+                            val next = (current - stepSize).coerceAtLeast(0f)
+                            onEvent(CameraUiEvent.SetFocusDistance(next))
                         }
-                    )
+                    ) {
+                        ContinuousSlider(
+                            initialPosition = initialPos,
+                            sensitivity = 60.0f,
+                            formatLabel = { pos ->
+                                val normalized = (pos / 1000f).coerceIn(0f, 1f)
+                                if (normalized >= 0.99f) "Inf"
+                                else if (normalized <= 0.01f) "Macro"
+                                else String.format("%.2f", normalized)
+                            },
+                            onValueChange = { pos ->
+                                val dist = max - (pos / 1000f) * max
+                                onEvent(CameraUiEvent.SetFocusDistance(dist))
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -321,77 +437,73 @@ fun CompactControlRow(
 }
 
 @Composable
-fun CompactSlider(
-    value: Int,
-    steps: Int,
-    labelMapper: (Int) -> String,
-    minLabel: String,
-    maxLabel: String,
-    onValueChange: (Int) -> Unit
+fun SliderWithFastSteps(
+    onStepDown: () -> Unit,
+    onStepUp: () -> Unit,
+    content: @Composable () -> Unit
 ) {
-    val view = LocalView.current
-    var sliderPosition by remember(value) { mutableFloatStateOf(value.toFloat()) }
-    var isDragging by remember { mutableStateOf(false) }
-
-    val currentValueLabel = remember(sliderPosition) {
-        val index = sliderPosition.roundToInt().coerceIn(0, steps - 1)
-        labelMapper(index)
-    }
-
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = currentValueLabel,
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 2.dp)
-        )
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = minLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.5f),
-                modifier = Modifier.padding(end = 8.dp)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        IconButton(onClick = onStepDown) {
+            Icon(
+                imageVector = Icons.Outlined.ChevronLeft,
+                contentDescription = "Decrease",
+                tint = Color.White
             )
+        }
 
-            Slider(
-                value = sliderPosition,
-                onValueChange = {
-                    isDragging = true
-                    val newIndex = it.roundToInt()
-                    if (newIndex != sliderPosition.roundToInt()) {
-                        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                        onValueChange(newIndex)
-                    }
-                    sliderPosition = it
-                },
-                onValueChangeFinished = { isDragging = false },
-                valueRange = 0f..(steps - 1).toFloat(),
-                steps = 0,
-                modifier = Modifier.weight(1f),
-                colors = SliderDefaults.colors(
-                    thumbColor = MaterialTheme.colorScheme.primary,
-                    activeTrackColor = MaterialTheme.colorScheme.primary,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                )
-            )
+        Box(modifier = Modifier.weight(1f)) {
+            content()
+        }
 
-            Text(
-                text = maxLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White.copy(alpha = 0.5f),
-                modifier = Modifier.padding(start = 8.dp)
+        IconButton(onClick = onStepUp) {
+            Icon(
+                imageVector = Icons.Outlined.ChevronRight,
+                contentDescription = "Increase",
+                tint = Color.White
             )
         }
     }
 }
 
+@Composable
+fun ContinuousSlider(
+    initialPosition: Float,
+    sensitivity: Float,
+    formatLabel: (Float) -> String,
+    onValueChange: (Float) -> Unit
+) {
+    var sliderPosition by remember(initialPosition) { mutableFloatStateOf(initialPosition) }
+    var lastHapticPos by remember { mutableFloatStateOf(initialPosition) }
+    val view = LocalView.current
+
+    InfiniteRulerDial(
+        currentValue = sliderPosition,
+        minValue = 0f,
+        maxValue = 1000f,
+        sensitivity = sensitivity,
+        onValueChange = { newValue ->
+            sliderPosition = newValue
+
+            if (abs(newValue - lastHapticPos) > 10f) {
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                lastHapticPos = newValue
+            }
+
+            onValueChange(newValue)
+        },
+        formatLabel = { formatLabel(it) }
+    )
+}
+
+
 private fun formatShutter(nano: Long?): String {
     if (nano == null || nano == 0L) return "Auto"
-    if (abs(nano - 20_833_333L) < 5000) return "1/48"
-    if (abs(nano - 41_666_666L) < 5000) return "1/24"
-    if (abs(nano - 8_333_333L) < 5000) return "1/120"
+    if (abs(nano - 20_833_333L) < 100_000) return "1/48"
+    if (abs(nano - 41_666_666L) < 100_000) return "1/24"
+    if (abs(nano - 8_333_333L) < 100_000) return "1/120"
 
     val sec = nano / 1_000_000_000.0
     if (sec >= 1.0) return String.format("%.1f\"", sec)
