@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <android/log.h>
+#include <fstream>
 #include <android/hardware_buffer.h>
 #include <android/hardware_buffer_jni.h>
 #include <android/native_window.h>
@@ -85,24 +86,43 @@ static void pinToFastestCores() {
     int numCores = sysconf(_SC_NPROCESSORS_CONF);
     int maxFreq = 0;
     std::vector<int> coreFreqs(numCores, 0);
+
     for (int i = 0; i < numCores; ++i) {
         char path[128];
         snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
-        FILE* f = fopen(path, "r");
-        if (f) {
-            fscanf(f, "%d", &coreFreqs[i]);
+        std::ifstream f(path);
+        if (f.is_open()) {
+            f >> coreFreqs[i];
             if (coreFreqs[i] > maxFreq) maxFreq = coreFreqs[i];
-            fclose(f);
         }
     }
+
+    if (maxFreq == 0) {
+        int startCore = (numCores > 4) ? (numCores / 2) : 0;
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        for (int i = startCore; i < numCores; ++i) CPU_SET(i, &cpuset);
+        sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+        LOGI("Pinned to upper half of cores (frequency info unavailable)");
+        return;
+    }
+
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
+    int pinnedCount = 0;
     for (int i = 0; i < numCores; ++i) {
-        if (coreFreqs[i] >= maxFreq * 0.9) {
+        if (coreFreqs[i] >= maxFreq * 0.9f) {
             CPU_SET(i, &cpuset);
+            pinnedCount++;
         }
     }
+
+    if (pinnedCount == 0) {
+        CPU_SET(0, &cpuset);
+    }
+
     sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    LOGI("Pinned render thread to %d performance cores", pinnedCount);
 }
 
 const char* VERTEX_SHADER = R"(#version 310 es
@@ -233,9 +253,13 @@ void main() {
         vec2 lscUV = vec2(pos) / uSensorSize;
         vec4 lscGains = texture(uLscTex, lscUV);
         float gGain = (lscGains.g + lscGains.b) * 0.5;
-        normalized.r *= lscGains.r;
-        normalized.g *= gGain;
-        normalized.b *= lscGains.a;
+
+        float maxNorm = max(normalized.r, max(normalized.g, normalized.b));
+        float lscFade = 1.0 - smoothstep(0.7, 1.0, maxNorm);
+
+        normalized.r *= mix(1.0, lscGains.r, lscFade);
+        normalized.g *= mix(1.0, gGain, lscFade);
+        normalized.b *= mix(1.0, lscGains.a, lscFade);
     }
 
     vec3 corrected = uCombinedMatrix * normalized;
@@ -376,6 +400,9 @@ struct GlesContext {
     float smoothedAvgNits = 0.0f;
     float smoothedMaxNits = 0.0f;
     bool firstMetadata = true;
+    bool lscUploaded = false;
+    int cachedLscW = 0;
+    int cachedLscH = 0;
 };
 
 std::map<jlong, GlesContext*> g_contexts;
@@ -510,7 +537,20 @@ void renderWorkerLoop(GlesContext* ctx) {
         if (job.lscW > 0 && job.lscH > 0 && !job.lscMap.empty()) {
             glActiveTexture(GL_TEXTURE1);
             glBindTexture(GL_TEXTURE_2D, ctx->lscTex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, job.lscW, job.lscH, 0, GL_RGBA, GL_FLOAT, job.lscMap.data());
+
+            if (!ctx->lscUploaded || ctx->cachedLscW != job.lscW || ctx->cachedLscH != job.lscH) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, job.lscW, job.lscH, 0, GL_RGBA, GL_FLOAT, job.lscMap.data());
+                ctx->cachedLscW = job.lscW;
+                ctx->cachedLscH = job.lscH;
+                ctx->lscUploaded = true;
+            } else {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, job.lscW, job.lscH, GL_RGBA, GL_FLOAT, job.lscMap.data());
+            }
+        }
+
+        if (ctx->lscUploaded) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, ctx->lscTex);
             glUniform1i(ctx->uLscTexLoc, 1);
             glUniform1i(ctx->uLscEnabledLoc, 1);
         } else {
