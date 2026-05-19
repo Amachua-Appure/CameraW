@@ -221,7 +221,10 @@ data class CameraUiState(
 
     val showClippingWarning: Boolean = false,
     val clippingMask: Bitmap? = null,
-)
+) {
+    val isVideoMode: Boolean
+        get() = cameraMode == CameraMode.PRO_VIDEO || cameraMode == CameraMode.RAW_VIDEO
+}
 
 class CameraViewModel : ViewModel() {
 
@@ -804,7 +807,8 @@ class CameraViewModel : ViewModel() {
                 validShutterSpeeds = CameraProUtils.getDynamicShutterList(
                     safeFps,
                     state.minShutter,
-                    state.maxShutter
+                    state.maxShutter,
+                    state.isVideoMode
                 )
             )
         }
