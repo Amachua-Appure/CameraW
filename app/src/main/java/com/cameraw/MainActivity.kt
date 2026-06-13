@@ -21,7 +21,6 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.camera2.params.StreamConfigurationMap
 import android.media.ImageReader
-import android.media.ImageWriter
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -44,7 +43,6 @@ import androidx.annotation.RequiresPermission
 import androidx.compose.runtime.*
 import androidx.compose.ui.geometry.Offset
 import androidx.core.content.ContextCompat
-import androidx.core.content.edit
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
@@ -52,6 +50,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -60,7 +59,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.math.abs
-import com.cameraw.FocusState
 
 class MainActivity : ComponentActivity() {
     private lateinit var cameraManager: CameraManager
@@ -107,6 +105,12 @@ class MainActivity : ComponentActivity() {
     private var rawAudioRecord: AudioRecord? = null
     private var rawOutputFile: File? = null
 
+    private val captureResultBuffer = ConcurrentHashMap<Long, TotalCaptureResult>()
+
+    private var recordingSessionStartTimeMs = 0L
+
+    private val gyroDataMap = ConcurrentHashMap<Long, ByteArray>()
+
     private companion object {
         const val TAG = "CameraW"
         val REQUIRED_PERMISSIONS = mutableListOf(
@@ -121,6 +125,9 @@ class MainActivity : ComponentActivity() {
             }
         }.toTypedArray()
         const val PREFS_NAME = "camera_prefs"
+
+        val MTK_GYRO_DATA_KEY by lazy { CaptureResult.Key("com.mediatek.3afeature.gyrodata", ByteArray::class.java) }
+        val MTK_GYRO_NUM_KEY by lazy { CaptureResult.Key("com.mediatek.3afeature.gyrodatavalidnum", Int::class.java) }
     }
 
     private val optimalPreviewSizeState = mutableStateOf(Size(1920, 1080))
@@ -192,13 +199,16 @@ class MainActivity : ComponentActivity() {
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         window.setSustainedPerformanceMode(true)
 
-        loadSavedPreferences()
         if (!hasPermissions()) permissionLauncher.launch(REQUIRED_PERMISSIONS)
 
         gyroflowLogger = GyroflowLogger(this)
 
         viewModel = ViewModelProvider(this)[CameraViewModel::class.java]
-
+        val initialState = viewModel.uiState.value
+        if (initialState.selectedLut != "None" && initialState.activeLutData == null) {
+            viewModel.onEvent(CameraUiEvent.SetLut(this, initialState.selectedLut))
+        }
+        viewModel.onEvent(CameraUiEvent.LoadAvailableLuts(this))
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val savedCameraId = prefs.getString("camera_id", "0") ?: "0"
         viewModel.onEvent(CameraUiEvent.SetCameraId(savedCameraId))
@@ -219,7 +229,6 @@ class MainActivity : ComponentActivity() {
                     },
                     deviceRotation = rememberDeviceOrientation(),
                     previewSize = optimalPreviewSizeState.value,
-                    sensorOrientation = currentSensorOrientationState.value,
                     isRecording = uiState.isRecording
                 )
             }
@@ -252,6 +261,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
     }
+
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         return when (keyCode) {
             android.view.KeyEvent.KEYCODE_VOLUME_UP,
@@ -264,6 +274,7 @@ class MainActivity : ComponentActivity() {
             else -> super.onKeyDown(keyCode, event)
         }
     }
+
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun handleUiEvent(event: CameraUiEvent) {
@@ -306,27 +317,21 @@ class MainActivity : ComponentActivity() {
             is CameraUiEvent.IsoClicked -> viewModel.onEvent(event)
             is CameraUiEvent.SettingsClicked -> viewModel.onEvent(CameraUiEvent.ToggleSettings)
 
-            is CameraUiEvent.SetVideoCodec -> {
-                prefs.edit { putString("video_codec", event.codec) }
+            is CameraUiEvent.SetVideoCodec,
+            is CameraUiEvent.SetAudioCodec,
+            is CameraUiEvent.SetQuality -> {
                 viewModel.onEvent(event)
+                viewModel.saveCurrentState(prefs)
             }
-            is CameraUiEvent.SetAudioCodec -> {
-                prefs.edit { putString("audio_codec", event.codec) }
+            is CameraUiEvent.SetNoiseReduction -> {
                 viewModel.onEvent(event)
+                viewModel.saveCurrentState(prefs)
+                if (isRecording) updateFlashDuringRecording() else updatePreview()
             }
             is CameraUiEvent.SetPhotoFormat -> {
                 viewModel.onEvent(event)
                 viewModel.saveCurrentState(prefs)
                 restartCameraSession()
-            }
-            is CameraUiEvent.SetQuality -> {
-                prefs.edit { putInt("quality", event.quality) }
-                viewModel.onEvent(event)
-            }
-            is CameraUiEvent.SetNoiseReduction -> {
-                prefs.edit { putInt("noise_reduction_mode", event.mode) }
-                viewModel.onEvent(event)
-                if (isRecording) updateFlashDuringRecording() else updatePreview()
             }
 
             is CameraUiEvent.SelectResolution -> {
@@ -334,7 +339,21 @@ class MainActivity : ComponentActivity() {
                 viewModel.saveCurrentState(prefs)
                 restartCameraSession()
             }
-
+            is CameraUiEvent.DumpMetadataClicked -> {
+                val currentResult = lastPreviewResult
+                if (currentResult != null) {
+                    try {
+                        val chars = cameraManager.getCameraCharacteristics(cameraId)
+                        MetadataDumper.dumpCameraState(this@MainActivity, chars, currentResult)
+                        Toast.makeText(this@MainActivity, "Metadata dump saved to files", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Dump failed", e)
+                        Toast.makeText(this@MainActivity, "Dump failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    Toast.makeText(this@MainActivity, "No frame data available yet. Wait for preview.", Toast.LENGTH_SHORT).show()
+                }
+            }
             is CameraUiEvent.TapToFocus -> {
                 viewModel.onEvent(event)
                 triggerAutofocus(event.point)
@@ -384,34 +403,46 @@ class MainActivity : ComponentActivity() {
                 startBackgroundThread()
                 textureViewSurfaceTexture?.let { openCamera(it) }
             }
-            is CameraUiEvent.SetVideoFormat,
             is CameraUiEvent.SetBurstFrames,
             is CameraUiEvent.SetPngCompression,
-            is CameraUiEvent.SetDynamicMetadataMode,
             is CameraUiEvent.ToggleSaveGyroData -> {
                 viewModel.onEvent(event)
                 viewModel.saveCurrentState(prefs)
             }
+            is CameraUiEvent.SetVideoFormat,
+            is CameraUiEvent.SetDynamicMetadataMode -> {
+                viewModel.onEvent(event)
+                viewModel.saveCurrentState(prefs)
+                if (!isRecording) restartCameraSession()
+            }
 
             is CameraUiEvent.SetHasFlash -> viewModel.onEvent(event)
 
+            is CameraUiEvent.SetLut -> {
+                viewModel.onEvent(event)
+                viewModel.saveCurrentState(getSharedPreferences(PREFS_NAME, MODE_PRIVATE))
+
+                if (isRecording && vulkanHandle != 0L) {
+                    val currentState = viewModel.uiState.value
+                    if (currentState.selectedLut != "None" && currentState.activeLutData != null) {
+                        vulkanBridge.nativeSetLut(vulkanHandle, currentState.activeLutData!!, currentState.activeLutSize, true)
+                    } else {
+                        vulkanBridge.nativeSetLut(vulkanHandle, null, 0, false)
+                    }
+                } else if (!isRecording) {
+                    restartCameraSession()
+                }
+            }
+            is CameraUiEvent.SetLogProfile -> {
+                viewModel.onEvent(event)
+                viewModel.saveCurrentState(getSharedPreferences(PREFS_NAME, MODE_PRIVATE))
+                if (!isRecording) restartCameraSession()
+            }
+            is CameraUiEvent.LoadAvailableLuts -> viewModel.onEvent(event)
+            is CameraUiEvent.ImportLut -> viewModel.onEvent(event)
+
             else -> viewModel.onEvent(event)
         }
-    }
-
-    private fun loadSavedPreferences() {
-        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-        val videoCodec = prefs.getString("video_codec", "video/hevc") ?: "video/hevc"
-        val audioCodec = prefs.getString("audio_codec", "0") ?: "0"
-        val quality = prefs.getInt("quality", 100)
-        val noiseReductionMode = prefs.getInt("noise_reduction_mode", 0)
-
-        CameraViewModel.savedPreferences = mapOf(
-            "videoCodec" to videoCodec,
-            "audioCodec" to audioCodec,
-            "quality" to quality.toString(),
-            "noiseReductionMode" to noiseReductionMode.toString()
-        )
     }
 
     private fun getOptimalPreviewSize(targetRes: Size): Size {
@@ -500,7 +531,6 @@ class MainActivity : ComponentActivity() {
                 }
             },
             template = CameraDevice.TEMPLATE_RECORD,
-            cameraMode = state.cameraMode,
             isRecordingSession = true
         )
     }
@@ -687,6 +717,28 @@ class MainActivity : ComponentActivity() {
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            val ts = result.get(CaptureResult.SENSOR_TIMESTAMP)
+            if (ts != null) {
+                captureResultBuffer[ts] = result
+                if (captureResultBuffer.size > 60) {
+                    val keysToDrop = captureResultBuffer.keys.sorted().take(20)
+                    keysToDrop.forEach { captureResultBuffer.remove(it) }
+                }
+
+                var gyroData: ByteArray? = null
+                try {
+                    gyroData = result.get(MTK_GYRO_DATA_KEY)
+                } catch (e: IllegalArgumentException) {
+                }
+                if (gyroData != null && gyroData.isNotEmpty()) {
+                    gyroDataMap[ts] = gyroData
+                    if (gyroDataMap.size > 120) {
+                        val toRemove = gyroDataMap.keys.sorted().take(30)
+                        toRemove.forEach { gyroDataMap.remove(it) }
+                    }
+                }
+            }
+
             val now = System.currentTimeMillis()
             if (now - lastMetadataUpdate.get() > 150) {
                 lastMetadataUpdate.set(now)
@@ -722,7 +774,6 @@ class MainActivity : ComponentActivity() {
         outputs: List<Surface>,
         stateCallback: CameraCaptureSession.StateCallback,
         template: Int,
-        cameraMode: CameraMode,
         isRecordingSession: Boolean = false
     ) {
         val device = cameraDevice ?: return
@@ -754,7 +805,7 @@ class MainActivity : ComponentActivity() {
                     device.createCaptureSession(outputs, stateCallback, backgroundHandler)
                 } catch (e2: Exception) {
                     Log.e(TAG, "Legacy session creation failed too", e2)
-                    if (isRecording) {
+                    if (isRecordingSession) {
                         backgroundHandler?.post { stopRecordingInternal() }
                     }
                 }
@@ -969,7 +1020,7 @@ class MainActivity : ComponentActivity() {
 
             if (rawReader == null || rawReader?.width != currentRes.width || rawReader?.height != currentRes.height) {
                 rawReader?.close()
-                rawReader = ImageReader.newInstance(currentRes.width, currentRes.height, ImageFormat.RAW_SENSOR, 12)
+                rawReader = ImageReader.newInstance(currentRes.width, currentRes.height, ImageFormat.RAW_SENSOR, 14)
                 activeRawImages.set(0)
             }
 
@@ -1027,7 +1078,6 @@ class MainActivity : ComponentActivity() {
                 }
             },
             template = CameraDevice.TEMPLATE_PREVIEW,
-            cameraMode = mode,
             isRecordingSession = false
         )
     }
@@ -1080,6 +1130,7 @@ class MainActivity : ComponentActivity() {
             Log.e(TAG, "Update preview failed", e)
         }
     }
+
     private fun applyManualControls(builder: CaptureRequest.Builder, isStillCapture: Boolean = false) {
         val state = viewModel.uiState.value
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -1274,6 +1325,7 @@ class MainActivity : ComponentActivity() {
         4 -> CameraMetadata.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG
         else -> CameraMetadata.NOISE_REDUCTION_MODE_OFF
     }
+
     private fun getJpegOrientation(deviceOrientation: Int): Int {
         val manager = getSystemService(CAMERA_SERVICE) as CameraManager
         val characteristics = manager.getCameraCharacteristics(cameraId)
@@ -1286,6 +1338,7 @@ class MainActivity : ComponentActivity() {
             (sensorOrientation - deviceOrientation + 360) % 360
         }
     }
+
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun takePhoto() {
         if (isCapturing.get() || isProcessing.get()) {
@@ -1319,6 +1372,7 @@ class MainActivity : ComponentActivity() {
                 val isUltraHighRes = currentRes.width > activeArrayW
 
                 if (isUltraHighRes) {
+                    burstFramesReceived = 0
                     val burstCount = viewModel.uiState.value.burstFrames
                     captureBuilder.addTarget(yuvReader!!.surface)
 
@@ -1332,6 +1386,7 @@ class MainActivity : ComponentActivity() {
                         override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
                             Log.e(TAG, "YUV Burst frame failed")
                             isCapturing.set(false)
+                            burstFramesReceived = 0
                         }
                     }, backgroundHandler)
                 } else {
@@ -1436,17 +1491,42 @@ class MainActivity : ComponentActivity() {
 
                 runOnUiThread { Toast.makeText(this@MainActivity, "Developing RAW...", Toast.LENGTH_SHORT).show() }
 
-                val blackLevels = lockedResult.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)
-                val safeBlackLevel = blackLevels?.getOrNull(0)?.toInt() ?: blackLevel
+                val count = images.size
+                val blackLevelsArray = FloatArray(count * 4)
+                val noiseProfilesArray = FloatArray(count * 8)
 
+                val baseBlackLevel = blackLevel
                 val shadingMap = lockedResult.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)
+
+                images.forEachIndexed { i, img ->
+                    val ts = img.timestamp
+                    var res = captureResultBuffer[ts]
+                    if (res == null) {
+                        val closestTs = captureResultBuffer.keys.minByOrNull { Math.abs(it - ts) }
+                        res = if (closestTs != null) captureResultBuffer[closestTs] else lockedResult
+                    }
+                    val safeRes = res ?: lockedResult
+
+                    val dbl = safeRes.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)
+                    if (dbl != null && dbl.size >= 4) {
+                        dbl.copyInto(blackLevelsArray, i * 4)
+                    } else {
+                        for(j in 0..3) blackLevelsArray[i*4 + j] = baseBlackLevel.toFloat()
+                    }
+
+                    val np = safeRes.get(CaptureResult.SENSOR_NOISE_PROFILE)
+                    if (np != null && np.size >= 4) {
+                        for (c in 0..3) {
+                            noiseProfilesArray[i * 8 + c * 2] = np[c].first.toFloat()
+                            noiseProfilesArray[i * 8 + c * 2 + 1] = np[c].second.toFloat()
+                        }
+                    } else {
+                        for(j in 0..7) noiseProfilesArray[i*8 + j] = 0.0001f
+                    }
+                }
 
                 val iso = lockedResult.get(CaptureResult.SENSOR_SENSITIVITY) ?: 100
                 val shutter = lockedResult.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 10_000_000L
-
-                val noiseProfile = lockedResult.get(CaptureResult.SENSOR_NOISE_PROFILE)
-                val noiseScale = noiseProfile?.get(0)?.first?.toFloat() ?: 0.0001f
-                val noiseOffset = noiseProfile?.get(0)?.second?.toFloat() ?: 0.0001f
 
                 val gains = lockedResult.get(CaptureResult.COLOR_CORRECTION_GAINS)
                 val wbTemp = if (gains != null) gainsToColorTemperature(gains) else 5500
@@ -1483,7 +1563,7 @@ class MainActivity : ComponentActivity() {
                     images = images,
                     file = tempFile,
                     whiteLevel = whiteLevel,
-                    blackLevel = safeBlackLevel,
+                    baseBlackLevel = baseBlackLevel,
                     shadingMap = shadingMap,
                     sensorOrientation = sensorOrientation,
                     deviceOrientation = currentOrientation,
@@ -1495,10 +1575,10 @@ class MainActivity : ComponentActivity() {
                     rGain = hwRGain,
                     bGain = hwBGain,
                     isFrontCamera = isFrontCamera,
-                    noiseScale = noiseScale,
-                    noiseOffset = noiseOffset,
                     characteristics = characteristics,
-                    captureResult = lockedResult
+                    captureResult = lockedResult,
+                    blackLevels = blackLevelsArray,
+                    noiseProfiles = noiseProfilesArray
                 )
 
                 saveToPublicStorage(tempFile, ext, mimeType)
@@ -1559,7 +1639,6 @@ class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun startRecordingInternal() {
         if (cameraDevice == null || isRecording) return
-
         try {
             captureSession?.stopRepeating()
             captureSession?.abortCaptures()
@@ -1623,8 +1702,10 @@ class MainActivity : ComponentActivity() {
             isTrueHdr = (mode == CameraMode.PRO_VIDEO && state.videoFormat == 1),
             sarNum = sarN,
             sarDen = sarD,
-            dynamicMetadataMode = if (state.videoFormat == 1) state.dynamicMetadataMode else 0,
-            orientationHint = getJpegOrientation(currentOrientation)
+            dynamicMetadataMode = if (state.videoFormat == 1 && state.logProfile == 0) state.dynamicMetadataMode else 0,
+            orientationHint = getJpegOrientation(currentOrientation),
+            logProfile = if (state.logProfile > 0 && state.selectedLut == "None") state.logProfile else 0,
+            isLutEnabled = state.selectedLut != "None"
         )
 
         if (mode != CameraMode.RAW_VIDEO) {
@@ -1656,6 +1737,7 @@ class MainActivity : ComponentActivity() {
         }
         return matrix
     }
+
     private fun setupAudioPipeline() {
         val audioBufferSize = AudioRecord.getMinBufferSize(48000, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
@@ -1679,6 +1761,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun setupRawVideoPipeline(state: CameraUiState) {
         val intendedRes = state.currentResolution
@@ -1766,6 +1849,18 @@ class MainActivity : ComponentActivity() {
 
         val softwareStr = "${Build.MANUFACTURER}/${Build.MODEL}/${Build.DISPLAY}"
 
+        val poseRef = chars.get(CameraCharacteristics.LENS_POSE_REFERENCE) ?: 0
+        val poseRot = chars.get(CameraCharacteristics.LENS_POSE_ROTATION) ?: floatArrayOf(0f, 0f, 0f, 0f)
+        val poseTrans = chars.get(CameraCharacteristics.LENS_POSE_TRANSLATION) ?: floatArrayOf(0f, 0f, 0f)
+        val intrinsic = chars.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION) ?: floatArrayOf(0f, 0f, 0f, 0f, 0f)
+        val distortion = chars.get(CameraCharacteristics.LENS_DISTORTION)
+            ?: chars.get(CameraCharacteristics.LENS_RADIAL_DISTORTION)
+            ?: floatArrayOf(0f, 0f, 0f, 0f, 0f)
+        val filterDensity = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FILTER_DENSITIES)?.firstOrNull() ?: 0f
+
+        val lensStaticFloats = poseRot + poseTrans + intrinsic + distortion + floatArrayOf(filterDensity)
+
+
         viewModel.startRecording(
             filePath = tempFile.absolutePath,
             blackLevel = avgBlackLevel,
@@ -1784,11 +1879,26 @@ class MainActivity : ComponentActivity() {
             activeW = activeW,
             activeH = activeH,
             offsetX = offsetX,
-            offsetY = offsetY
+            offsetY = offsetY,
+            lensStaticFloats = lensStaticFloats,
+            poseReference = poseRef
         )
+
+        val rawNoiseArray = DoubleArray(8)
+        val rawDynFloats = FloatArray(10)
+        val rawDynInts = IntArray(3)
+        val rawDynLongs = LongArray(2)
+        var rawLscBuffer = FloatArray(0)
+        val emptyLscArray = FloatArray(0)
+
         rawReader!!.setOnImageAvailableListener({ reader ->
             val img = try { reader.acquireNextImage() } catch (e: Exception) { null } ?: return@setOnImageAvailableListener
             if (!isRecording) {
+                img.close()
+                return@setOnImageAvailableListener
+            }
+
+            if (android.os.SystemClock.elapsedRealtime() - recordingSessionStartTimeMs < 300) {
                 img.close()
                 return@setOnImageAvailableListener
             }
@@ -1797,39 +1907,80 @@ class MainActivity : ComponentActivity() {
             val iso = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 100
             val shutterNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 10_000_000L
 
-            val noise = result.get(CaptureResult.SENSOR_NOISE_PROFILE)
-            val noiseArray = doubleArrayOf(
-                noise?.get(0)?.first ?: 0.0, noise?.get(0)?.second ?: 0.0,
-                noise?.get(1)?.first ?: 0.0, noise?.get(1)?.second ?: 0.0,
-                noise?.get(2)?.first ?: 0.0, noise?.get(2)?.second ?: 0.0
-            )
+            val noisePairs = result.get(CaptureResult.SENSOR_NOISE_PROFILE)
+            if (noisePairs != null && noisePairs.size >= 4) {
+                rawNoiseArray[0] = noisePairs[0].first.toDouble()
+                rawNoiseArray[1] = noisePairs[0].second.toDouble()
+                rawNoiseArray[2] = noisePairs[1].first.toDouble()
+                rawNoiseArray[3] = noisePairs[1].second.toDouble()
+                rawNoiseArray[4] = noisePairs[2].first.toDouble()
+                rawNoiseArray[5] = noisePairs[2].second.toDouble()
+                rawNoiseArray[6] = noisePairs[3].first.toDouble()
+                rawNoiseArray[7] = noisePairs[3].second.toDouble()
+            }
 
             val lscMap = result.get(CaptureResult.STATISTICS_LENS_SHADING_CORRECTION_MAP)
-            var lscArray: FloatArray? = null
             var lscW = 0
             var lscH = 0
-            if (lscMap != null) {
+            val lscArray = if (lscMap != null) {
                 lscW = lscMap.columnCount
                 lscH = lscMap.rowCount
-                lscArray = FloatArray(lscW * lscH * 4)
-                lscMap.copyGainFactors(lscArray, 0)
-            }
+                val needed = lscW * lscH * 4
+                if (rawLscBuffer.size != needed) rawLscBuffer = FloatArray(needed)
+                lscMap.copyGainFactors(rawLscBuffer, 0)
+                rawLscBuffer
+            } else emptyLscArray
+
+            val timestampUs = img.timestamp
+            var gyroNum = 0
+            var gyroBytes: ByteArray? = null
+            try {
+                gyroNum = result.get(MTK_GYRO_NUM_KEY) ?: 0
+                gyroBytes = result.get(MTK_GYRO_DATA_KEY)
+            } catch (e: Exception) { }
+
+            val dynBlack = result.get(CaptureResult.SENSOR_DYNAMIC_BLACK_LEVEL)
+            val neutral = result.get(CaptureResult.SENSOR_NEUTRAL_COLOR_POINT)
+            val focusRange = result.get(CaptureResult.LENS_FOCUS_RANGE)
+
+            rawDynFloats[0] = dynBlack?.getOrNull(0) ?: avgBlackLevel.toFloat()
+            rawDynFloats[1] = dynBlack?.getOrNull(1) ?: avgBlackLevel.toFloat()
+            rawDynFloats[2] = dynBlack?.getOrNull(2) ?: avgBlackLevel.toFloat()
+            rawDynFloats[3] = dynBlack?.getOrNull(3) ?: avgBlackLevel.toFloat()
+            rawDynFloats[4] = neutral?.getOrNull(0)?.toFloat() ?: 0f
+            rawDynFloats[5] = neutral?.getOrNull(1)?.toFloat() ?: 0f
+            rawDynFloats[6] = neutral?.getOrNull(2)?.toFloat() ?: 0f
+            rawDynFloats[7] = result.get(CaptureResult.LENS_FOCUS_DISTANCE) ?: 0f
+            rawDynFloats[8] = focusRange?.first ?: 0f
+            rawDynFloats[9] = focusRange?.second ?: 0f
+
+            rawDynInts[0] = result.get(CaptureResult.SENSOR_DYNAMIC_WHITE_LEVEL) ?: whiteLevel
+            rawDynInts[1] = result.get(CaptureResult.LENS_STATE) ?: 0
+            rawDynInts[2] = gyroNum
+
+            rawDynLongs[0] = result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: 0L
+            rawDynLongs[1] = result.get(CaptureResult.SENSOR_ROLLING_SHUTTER_SKEW) ?: 0L
 
             val hardwareBuffer = img.hardwareBuffer
             if (hardwareBuffer != null) {
                 viewModel.processRawFrameSync(
                     hardwareBuffer,
-                    img.timestamp,
+                    timestampUs,
                     iso,
                     shutterNs,
-                    noiseArray,
+                    rawNoiseArray,
                     lscArray,
                     lscW,
                     lscH,
                     img.planes[0].rowStride,
                     offsetX,
-                    offsetY
+                    offsetY,
+                    rawDynFloats,
+                    rawDynInts,
+                    rawDynLongs,
+                    gyroBytes
                 )
+                hardwareBuffer.close()
             } else {
                 Log.e(TAG, "HardwareBuffer was null! Ensure USAGE_CPU_READ_OFTEN is set.")
             }
@@ -1871,6 +2022,7 @@ class MainActivity : ComponentActivity() {
 
                     isRecording = true
                     recordingStartTime = System.currentTimeMillis()
+                    recordingSessionStartTimeMs = android.os.SystemClock.elapsedRealtime()
                     timerHandler.post(timerRunnable)
                     viewModel.onEvent(CameraUiEvent.RecordingStarted)
                 }
@@ -1880,7 +2032,6 @@ class MainActivity : ComponentActivity() {
                 }
             },
             template = CameraDevice.TEMPLATE_RECORD,
-            cameraMode = CameraMode.RAW_VIDEO,
             isRecordingSession = true
         )
     }
@@ -1929,6 +2080,7 @@ class MainActivity : ComponentActivity() {
         Log.i(TAG, "Final Max HEVC Hardware Resolution: ${maxWidth}x${maxHeight}")
         return Size(maxWidth, maxHeight)
     }
+
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun setupProVideoPipeline(state: CameraUiState, encW: Int, encH: Int, intendedW: Int, intendedH: Int) {
         val rec = recorder ?: return
@@ -1940,22 +2092,68 @@ class MainActivity : ComponentActivity() {
         val optimalPreview = optimalPreviewSizeState.value
         textureViewSurfaceTexture?.setDefaultBufferSize(optimalPreview.width, optimalPreview.height)
 
-        val actualHdrMode = if (state.videoFormat == 1) state.dynamicMetadataMode else 0
+        val actualHdrMode = if (state.videoFormat == 1 && state.logProfile == 0) {
+            if (state.dynamicMetadataMode == 0) 3 else state.dynamicMetadataMode
+        } else 0
+
+        val actualLogProfile = state.logProfile
+
         vulkanHandle = vulkanBridge.nativeCreate(
             encW, encH, intendedW, intendedH,
             bestRawSize.width, bestRawSize.height, blackLevel, whiteLevel,
             actualHdrMode,
+            actualLogProfile,
             colorFilterArrangement
         )
+        if (state.selectedLut != "None" && state.activeLutData != null) {
+            val enableLut = (actualLogProfile > 0 || state.logProfile > 0)
+            vulkanBridge.nativeSetLut(
+                vulkanHandle,
+                state.activeLutData,
+                state.activeLutSize,
+                enableLut
+            )
+        }else {
+            vulkanBridge.nativeSetLut(vulkanHandle, null, 0, false)
+        }
 
         vulkanBridge.nativeBindEncoderSurface(vulkanHandle, rec.encoderSurface!!)
 
-        rawReader = ImageReader.newInstance(bestRawSize.width, bestRawSize.height, ImageFormat.RAW_SENSOR, 4)
+        rawReader = ImageReader.newInstance(bestRawSize.width, bestRawSize.height, ImageFormat.RAW_SENSOR, 4,
+            android.hardware.HardwareBuffer.USAGE_CPU_READ_OFTEN)
 
         val XYZ_D50_TO_BT2020 = floatArrayOf(
             1.64734f, -0.39357f, -0.23599f,
             -0.68259f,  1.64758f,  0.01281f,
             0.02963f, -0.06288f,  1.25313f
+        )
+        val XYZ_D50_TO_APPLE_AWG = floatArrayOf(
+            1.6615f, -0.5169f, -0.1034f,
+            -0.5826f,  1.4105f,  0.1833f,
+            0.0267f,  0.0147f,  1.1628f
+        )
+        val XYZ_D50_TO_BT709 = floatArrayOf(
+            3.13419f, -1.61721f, -0.49069f,
+            -0.97875f,  1.91613f,  0.03343f,
+            0.07196f, -0.22899f,  1.40575f
+        )
+
+        val XYZ_D50_TO_S_GAMUT3_CINE = floatArrayOf(
+            1.778491f, -0.572437f, -0.172494f,
+            -0.456676f,  1.276822f,  0.198101f,
+            0.046924f,  0.002482f,  1.153738f
+        )
+
+        val XYZ_D50_TO_V_GAMUT = floatArrayOf(
+            1.525055f, -0.349225f, -0.146876f,
+            -0.548556f,  1.420092f,  0.131853f,
+            0.021715f, -0.015579f,  1.205059f
+        )
+
+        val XYZ_D50_TO_AWG3 = floatArrayOf(
+            1.722235f, -0.527407f, -0.161337f,
+            -0.647049f,  1.418907f,  0.248344f,
+            -0.033546f,  0.071512f,  1.164107f
         )
 
         fun extractTransform(transform: ColorSpaceTransform?): FloatArray {
@@ -2016,6 +2214,12 @@ class MainActivity : ComponentActivity() {
                 img.close()
                 return@setOnImageAvailableListener
             }
+
+            if (android.os.SystemClock.elapsedRealtime() - recordingSessionStartTimeMs < 300) {
+                img.close()
+                return@setOnImageAvailableListener
+            }
+
             val hb = img.hardwareBuffer
             if (hb == null) {
                 img.close()
@@ -2036,7 +2240,21 @@ class MainActivity : ComponentActivity() {
             val wbTemp = if (gains != null) gainsToColorTemperature(gains) else 5500
             if (abs(wbTemp - lastWbTemp) > 50) {
                 updateInterpolatedMatrix(wbTemp, cameraToXyz)
-                updateMultipliedMatrix(XYZ_D50_TO_BT2020, cameraToXyz, cachedMatrix)
+
+                val targetGamut = if (state.logProfile == 2) {
+                    XYZ_D50_TO_APPLE_AWG
+                } else if (state.logProfile == 4) {
+                    XYZ_D50_TO_S_GAMUT3_CINE
+                } else if (state.logProfile == 5) {
+                    XYZ_D50_TO_V_GAMUT
+                } else if (state.logProfile == 6) {
+                    XYZ_D50_TO_AWG3
+                } else if (state.videoFormat == 1 || state.logProfile == 1 || state.logProfile == 3) {
+                    XYZ_D50_TO_BT2020
+                } else {
+                    XYZ_D50_TO_BT709
+                }
+                updateMultipliedMatrix(targetGamut, cameraToXyz, cachedMatrix)
                 lastWbTemp = wbTemp
             }
 
@@ -2051,8 +2269,11 @@ class MainActivity : ComponentActivity() {
                 lscBuffer
             } else emptyLscArray
 
+            val timestampUs = img.timestamp
+
             vulkanBridge.nativeProcessFrameBuffer(
-                vulkanHandle, hb, img.timestamp, wbGainsArray, cachedMatrix, expNs, iso, -1, lscArray, lscW, lscH
+                vulkanHandle, hb, timestampUs, wbGainsArray, cachedMatrix,
+                expNs, iso, -1, lscArray, lscW, lscH
             )
 
             hb.close()
@@ -2062,9 +2283,9 @@ class MainActivity : ComponentActivity() {
         val rawSurface = rawReader!!.surface
 
         vulkanBridge.metadataListener = object : VulkanHdrBridge.HdrMetadataListener {
-            override fun onDynamicMetadataReady(metadata: ByteArray, dvMin: Int, dvMax: Int, dvAvg: Int, timestampNs: Long) {
+            override fun onDynamicMetadataReady(metadata: ByteArray, timestampNs: Long) {
                 if (isRecording) {
-                    recorder?.updateDynamicMetadata(metadata, dvMin, dvMax, dvAvg, timestampNs)
+                    recorder?.updateDynamicMetadata(metadata, timestampNs)
                 }
             }
         }
@@ -2074,62 +2295,46 @@ class MainActivity : ComponentActivity() {
             stateCallback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
-                    val warmupBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-                    warmupBuilder.addTarget(textureViewSurface!!)
+                    try {
+                        val recordBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
 
-                    applyManualControls(warmupBuilder)
+                        recordBuilder.addTarget(textureViewSurface!!)
+                        recordBuilder.addTarget(rawSurface)
 
-                    if (hasUltraHighRes) warmupBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
-                    warmupBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
-                    warmupBuilder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
-                    warmupBuilder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_OFF)
-                    warmupBuilder.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
+                        val targetFps = state.currentFps
+                        recordBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(targetFps, targetFps))
+                        recordBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / targetFps)
+                        recordBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
 
-                    session.setRepeatingRequest(warmupBuilder.build(), captureCallback, backgroundHandler)
-                    isRecording = true
+                        applyManualControls(recordBuilder)
 
-                    backgroundHandler?.postDelayed({
-                        if (!isRecording) return@postDelayed
+                        if (hasUltraHighRes) recordBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
+                        recordBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
+                        recordBuilder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+                        recordBuilder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_OFF)
+                        recordBuilder.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
 
-                        try {
-                            val recordBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-                            recordBuilder.addTarget(textureViewSurface!!)
-                            recordBuilder.addTarget(rawSurface)
+                        activeRequestBuilder = recordBuilder
+                        activeRequestSession = session
 
-                            val targetFps = state.currentFps
-                            recordBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(targetFps, targetFps))
-                            recordBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / targetFps)
-                            recordBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD)
+                        session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
 
-                            applyManualControls(recordBuilder)
+                        isRecording = true
+                        recordingStartTime = System.currentTimeMillis()
+                        recordingSessionStartTimeMs = android.os.SystemClock.elapsedRealtime()
+                        timerHandler.post(timerRunnable)
+                        viewModel.onEvent(CameraUiEvent.RecordingStarted)
 
-                            if (hasUltraHighRes) recordBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION)
-                            recordBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_OFF)
-                            recordBuilder.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
-                            recordBuilder.set(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CameraMetadata.COLOR_CORRECTION_ABERRATION_MODE_OFF)
-                            recordBuilder.set(CaptureRequest.STATISTICS_LENS_SHADING_MAP_MODE, CameraMetadata.STATISTICS_LENS_SHADING_MAP_MODE_ON)
-
-                            activeRequestBuilder = recordBuilder
-                            activeRequestSession = session
-
-                            session.setRepeatingRequest(recordBuilder.build(), captureCallback, backgroundHandler)
-
-                            recordingStartTime = System.currentTimeMillis()
-                            timerHandler.post(timerRunnable)
-                            viewModel.onEvent(CameraUiEvent.RecordingStarted)
-
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to swap to Pro Video record state", e)
-                            stopRecordingInternal()
-                        }
-                    }, 300)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to swap to Pro Video record state", e)
+                        stopRecordingInternal()
+                    }
                 }
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     stopRecordingInternal()
                 }
             },
             template = CameraDevice.TEMPLATE_RECORD,
-            cameraMode = CameraMode.PRO_VIDEO,
             isRecordingSession = true
         )
     }
@@ -2192,6 +2397,8 @@ class MainActivity : ComponentActivity() {
             }
             currentGcsvFile = null
         }
+
+        gyroDataMap.clear()
 
         viewModel.stopRecording {
             thread(start = true, name = "MLVSaver") {

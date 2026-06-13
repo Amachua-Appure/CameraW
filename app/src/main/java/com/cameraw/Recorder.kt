@@ -73,7 +73,9 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
         val sarNum: Int = 1,
         val sarDen: Int = 1,
         val dynamicMetadataMode: Int = 1,
-        val orientationHint: Int = 0
+        val orientationHint: Int = 0,
+        val logProfile: Int = 0,
+        val isLutEnabled: Boolean = false
     )
 
     var encoderSurface: Surface? = null
@@ -114,16 +116,13 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
 
     private data class DynamicMetadataPacket(
         val hdr10p: ByteArray,
-        val dvMin: Int,
-        val dvMax: Int,
-        val dvAvg: Int
     )
 
     private val dynamicMetadataQueue = ConcurrentSkipListMap<Long, DynamicMetadataPacket>()
 
-    fun updateDynamicMetadata(metadataBytes: ByteArray, dvMin: Int, dvMax: Int, dvAvg: Int, timestampNs: Long) {
-        dynamicMetadataQueue[timestampNs] = DynamicMetadataPacket(metadataBytes, dvMin, dvMax, dvAvg)
-        Log.v(TAG, "Queued dynamic metadata, timestamp=${timestampNs}ns, HDR10+ size=${metadataBytes.size}, DV ($dvMin, $dvMax, $dvAvg)")
+    fun updateDynamicMetadata(metadataBytes: ByteArray, timestampNs: Long) {
+        dynamicMetadataQueue[timestampNs] = DynamicMetadataPacket(metadataBytes)
+        Log.v(TAG, "Queued dynamic metadata, timestamp=${timestampNs}ns, HDR10+ size=${metadataBytes.size}")
     }
 
     private fun escapeRbsp(input: ByteArray): ByteArray = Companion.escapeRbsp(input)
@@ -216,13 +215,17 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
 
         val dynamicMode = config?.dynamicMetadataMode ?: 0
         val isTrueHdr = config?.isTrueHdr == true
+        val logProfile = config?.logProfile ?: 0
 
         val needsRemux = (config?.sarNum != 1 || config?.sarDen != 1) ||
-                (isTrueHdr && dynamicMode == 2)
+                (isTrueHdr && dynamicMode == 2) || logProfile > 0
 
         if (needsRemux && tempMp4File != null && tempMp4File!!.exists()) {
             val remuxedFile = File(context.cacheDir, "$fileName--.mp4")
             Log.i(TAG, "Starting fast FFmpeg remux...")
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(context, "FFmpeg muxing...", android.widget.Toast.LENGTH_SHORT).show()
+            }
 
             val remuxHdrMode = if (isTrueHdr) dynamicMode else 0
 
@@ -231,7 +234,8 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
                 remuxedFile.absolutePath,
                 config?.sarNum ?: 1,
                 config?.sarDen ?: 1,
-                remuxHdrMode
+                remuxHdrMode,
+                logProfile
             )
 
             if (success && remuxedFile.exists()) {
@@ -246,6 +250,9 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
         }
 
         copyToMediaStore()
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(context, "Video saved", android.widget.Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun buildHdrStaticInfo(maxNits: Float, minNits: Float, useBt2020: Boolean): ByteBuffer {
@@ -305,7 +312,7 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             }
 
-            if (cfg.isHdr || cfg.isTrueHdr || cfg.isSdrPassthrough) {
+            if (cfg.isHdr || cfg.isTrueHdr || cfg.isSdrPassthrough || cfg.isLutEnabled) {
                 require(cfg.videoCodecMime.contains("hevc", ignoreCase = true)) { "HDR/Log requires HEVC" }
 
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -314,6 +321,16 @@ class Recorder(private val context: Context, private val prefs: SharedPreference
                     setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
                     setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
                     setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                } else if (cfg.isLutEnabled) {
+                    setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                    setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                    setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                } else if (cfg.isTrueHdr && cfg.logProfile > 0) {
+                    setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
+                    setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                    setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10)
+                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.HEVCMainTierLevel61)
                 } else {
                     setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT2020)
                     setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_ST2084)

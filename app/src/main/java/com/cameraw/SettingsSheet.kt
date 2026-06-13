@@ -9,7 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -23,20 +24,42 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 
+@Immutable
+data class SheetConfigState(
+    val photoBitDepth: Int,
+    val burstFrames: Int,
+    val pngCompression: Int,
+    val noiseReductionMode: Int,
+    val videoFormat: Int,
+    val videoCodec: String,
+    val quality: Int,
+    val dynamicMetadataMode: Int,
+    val audioCodec: String,
+    val saveGyroData: Boolean,
+    val cameraMode: CameraMode,
+    val logProfile: Int,
+    val selectedLut: String,
+    val availableLuts: List<String>
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsSheet(
     onDismiss: () -> Unit,
-    state: CameraUiState,
-    onEvent: (CameraUiEvent) -> Unit
+    config: SheetConfigState,
+    onEvent: (CameraUiEvent) -> Unit,
+    onImportLut: () -> Unit
 ) {
     val pureBlack = Color.Black
+    val context = LocalContext.current
+
     var showVideoCodecDialog by remember { mutableStateOf(false) }
     var showAudioCodecDialog by remember { mutableStateOf(false) }
     var showQualityDialog by remember { mutableStateOf(false) }
@@ -46,6 +69,44 @@ fun SettingsSheet(
     var showFormatDialog by remember { mutableStateOf(false) }
     var showMetadataDialog by remember { mutableStateOf(false) }
     var showVideoFormatDialog by remember { mutableStateOf(false) }
+    var showLogDialog by remember { mutableStateOf(false) }
+    var showLutDialog by remember { mutableStateOf(false) }
+
+    val photoFormatValue = remember(config.photoBitDepth) {
+        when (config.photoBitDepth) {
+            16 -> "16-bit HDR (PQ)/PNG"
+            14 -> "16-bit RAW (DNG)"
+            10 -> "10-bit HLG/AVIF"
+            else -> "8-bit ISP (JPEG)"
+        }
+    }
+
+    val noiseReductionValue = remember(config.noiseReductionMode) {
+        when (config.noiseReductionMode) {
+            0 -> "Off"
+            1 -> "Fast"
+            2 -> "High Quality"
+            3 -> "Minimal"
+            4 -> "ZSL"
+            else -> "Off"
+        }
+    }
+
+    val dynamicMetadataValue = remember(config.dynamicMetadataMode) {
+        when (config.dynamicMetadataMode) {
+            0 -> "None (Static HDR10)"
+            1 -> "HDR10+ (ST.2094-40)"
+            else -> "HDR10+"
+        }
+    }
+
+    val audioCodecValue = remember(config.audioCodec) {
+        when (config.audioCodec) {
+            "1" -> "Opus (High Efficiency)"
+            "2" -> "None"
+            else -> "WAV (Lossless)"
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -64,163 +125,168 @@ fun SettingsSheet(
             ) {}
         }
     ) {
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
-                .padding(bottom = 48.dp),
+                .padding(bottom = 48.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            item {
-                Text(
-                    text = "Settings",
-                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
-                    color = Color.White,
-                    modifier = Modifier.padding(start = 12.dp, bottom = 16.dp, top = 8.dp)
-                )
-            }
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+                color = Color.White,
+                modifier = Modifier.padding(start = 12.dp, bottom = 16.dp, top = 8.dp)
+            )
 
-            item {
-                Text(
-                    text = "Photo",
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
-                )
-            }
+            Text(
+                text = "Photo",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
+            )
 
-            item {
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.HdrAuto,
+                label = "Photo Format",
+                value = photoFormatValue,
+                highlight = true,
+                onClick = remember { { showFormatDialog = true } }
+            )
+
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.BurstMode,
+                label = "Frame Stacking",
+                value = "${config.burstFrames} Frames",
+                highlight = true,
+                onClick = remember { { showBurstDialog = true } }
+            )
+
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.Compress,
+                label = "PNG Compression",
+                value = "Level ${config.pngCompression}",
+                highlight = true,
+                onClick = remember { { showPngDialog = true } }
+            )
+
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.HdrAuto,
+                label = "Noise Reduction",
+                value = noiseReductionValue,
+                highlight = true,
+                onClick = remember { { showNoiseDialog = true } }
+            )
+
+            Text(
+                text = "Video & Audio",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+            )
+
+            if (config.logProfile == 0) {
                 ExpressiveSettingRow(
-                    icon = Icons.Outlined.HdrAuto,
-                    label = "Photo Format",
-                    value = when (state.photoBitDepth) {
-                        16 -> "16-bit HDR (PQ)/PNG"
-                        14 -> "16-bit RAW (DNG)"
-                        10 -> "10-bit HLG/AVIF"
-                        else -> "8-bit ISP (JPEG)"
-                    },
+                    icon = if (config.videoFormat == 1) Icons.Outlined.HdrOn else Icons.Outlined.HdrOff,
+                    label = "Dynamic Range",
+                    value = if (config.videoFormat == 1) "HDR10 (10-bit Rec.2020)" else "SDR (10-bit Rec.709)",
                     highlight = true,
-                    onClick = { showFormatDialog = true }
+                    onClick = remember { { showVideoFormatDialog = true } }
                 )
             }
 
-            item {
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.Movie,
+                label = "Video Codec",
+                value = if (config.videoCodec.contains("hevc")) "HEVC (H.265)" else "AVC (H.264)",
+                highlight = true,
+                onClick = remember { { showVideoCodecDialog = true } }
+            )
+
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.Speed,
+                label = "Bitrate",
+                value = "${config.quality} Mbps",
+                highlight = true,
+                onClick = remember { { showQualityDialog = true } }
+            )
+
+            if (config.cameraMode == CameraMode.PRO_VIDEO && config.videoFormat == 1 && config.logProfile == 0) {
                 ExpressiveSettingRow(
-                    icon = Icons.Outlined.BurstMode,
-                    label = "Frame Stacking",
-                    value = "${state.burstFrames} Frames",
+                    icon = Icons.Outlined.Movie,
+                    label = "Dynamic Metadata",
+                    value = dynamicMetadataValue,
                     highlight = true,
-                    onClick = { showBurstDialog = true }
+                    onClick = remember { { showMetadataDialog = true } }
                 )
             }
 
-            item {
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.GraphicEq,
+                label = "Additional Audio Codec",
+                value = audioCodecValue,
+                highlight = true,
+                onClick = remember { { showAudioCodecDialog = true } }
+            )
+
+            if (config.cameraMode == CameraMode.PRO_VIDEO || config.cameraMode == CameraMode.RAW_VIDEO) {
                 ExpressiveSettingRow(
-                    icon = Icons.Outlined.Compress,
-                    label = "PNG Compression",
-                    value = "Level ${state.pngCompression}",
-                    highlight = true,
-                    onClick = { showPngDialog = true }
+                    icon = if (config.saveGyroData) Icons.Outlined.Sensors else Icons.Outlined.SensorsOff,
+                    label = "Log Gyroflow Data",
+                    value = if (config.saveGyroData) "Enabled (.gcsv)" else "Disabled",
+                    highlight = config.saveGyroData,
+                    onClick = remember(onEvent) { { onEvent(CameraUiEvent.ToggleSaveGyroData) } }
                 )
             }
 
-            item {
+            if (config.cameraMode == CameraMode.PRO_VIDEO) {
                 ExpressiveSettingRow(
-                    icon = Icons.Outlined.HdrAuto,
-                    label = "Noise Reduction",
-                    value = when (state.noiseReductionMode) {
-                        0 -> "Off"
-                        1 -> "Fast"
-                        2 -> "High Quality"
-                        3 -> "Minimal"
-                        4 -> "ZSL"
+                    icon = Icons.Outlined.Movie,
+                    label = "Log Profile",
+                    value = when (config.logProfile) {
+                        1 -> "Apple Log"
+                        2 -> "Apple Log 2 (AWG)"
+                        3 -> "Samsung Log"
+                        4 -> "Sony S-Log3"
+                        5 -> "Panasonic V-Log"
+                        6 -> "ARRI LogC3"
                         else -> "Off"
                     },
                     highlight = true,
-                    onClick = { showNoiseDialog = true }
+                    onClick = remember { { showLogDialog = true } }
                 )
-            }
 
-            item {
-                Text(
-                    text = "Video & Audio",
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
-                )
-            }
-
-            item {
-                ExpressiveSettingRow(
-                    icon = if (state.videoFormat == 1) Icons.Outlined.HdrOn else Icons.Outlined.HdrOff,
-                    label = "Dynamic Range",
-                    value = if (state.videoFormat == 1) "HDR10 (10-bit Rec.2020)" else "SDR (10-bit Rec.709)",
-                    highlight = true,
-                    onClick = { showVideoFormatDialog = true }
-                )
-            }
-
-            item {
-                ExpressiveSettingRow(
-                    icon = Icons.Outlined.Movie,
-                    label = "Video Codec",
-                    value = if (state.videoCodec.contains("hevc")) "HEVC (H.265)" else "AVC (H.264)",
-                    highlight = true,
-                    onClick = { showVideoCodecDialog = true }
-                )
-            }
-
-            item {
-                ExpressiveSettingRow(
-                    icon = Icons.Outlined.Speed,
-                    label = "Bitrate",
-                    value = "${state.quality} Mbps",
-                    highlight = true,
-                    onClick = { showQualityDialog = true }
-                )
-            }
-
-            if (state.cameraMode == CameraMode.PRO_VIDEO && state.videoFormat == 1) {
-                item {
+                if (config.logProfile > 0) {
                     ExpressiveSettingRow(
-                        icon = Icons.Outlined.Movie,
-                        label = "Dynamic Metadata",
-                        value = when (state.dynamicMetadataMode) {
-                            0 -> "None (Static HDR10)"
-                            1 -> "HDR10+ (ST.2094-40)"
-                            else -> "HDR10+"
-                        },
-                        highlight = true,
-                        onClick = { showMetadataDialog = true }
+                        icon = Icons.Outlined.ColorLens,
+                        label = "Custom LUT",
+                        value = config.selectedLut,
+                        highlight = config.selectedLut != "None",
+                        onClick = remember { { showLutDialog = true } }
                     )
                 }
             }
 
-            item {
-                ExpressiveSettingRow(
-                    icon = Icons.Outlined.GraphicEq,
-                    label = "Additional Audio Codec",
-                    value = when (state.audioCodec) {
-                        "1" -> "Opus (High Efficiency)"
-                        "2" -> "None"
-                        else -> "WAV (Lossless)"
-                    },
-                    highlight = true,
-                    onClick = { showAudioCodecDialog = true }
-                )
-            }
+            Text(
+                text = "Developer",
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+            )
 
-            if (state.cameraMode == CameraMode.PRO_VIDEO || state.cameraMode == CameraMode.RAW_VIDEO) {
-                item {
-                    ExpressiveSettingRow(
-                        icon = if (state.saveGyroData) Icons.Outlined.Sensors else Icons.Outlined.SensorsOff,
-                        label = "Log Gyroflow Data",
-                        value = if (state.saveGyroData) "Enabled (.gcsv)" else "Disabled",
-                        highlight = state.saveGyroData,
-                        onClick = { onEvent(CameraUiEvent.ToggleSaveGyroData) }
-                    )
+            ExpressiveSettingRow(
+                icon = Icons.Outlined.BugReport,
+                label = "Dump Camera Metadata",
+                value = "Save state and frame data to .txt",
+                highlight = false,
+                onClick = remember(onEvent, onDismiss) {
+                    {
+                        onEvent(CameraUiEvent.DumpMetadataClicked)
+                        onDismiss()
+                    }
                 }
-            }
+            )
         }
     }
 
@@ -233,7 +299,7 @@ fun SettingsSheet(
                 10 to "10-bit HLG/AVIF",
                 8 to "8-bit ISP (JPEG)"
             ),
-            currentValue = state.photoBitDepth,
+            currentValue = config.photoBitDepth,
             onDismiss = { showFormatDialog = false },
             onSelect = { onEvent(CameraUiEvent.SetPhotoFormat(it)) }
         )
@@ -242,8 +308,8 @@ fun SettingsSheet(
     if (showBurstDialog) {
         ExpressiveCounterDialog(
             title = "Frame Stacking",
-            currentValue = state.burstFrames,
-            range = 1..12,
+            currentValue = config.burstFrames,
+            range = 1..14,
             unit = "Frames",
             onDismiss = { showBurstDialog = false },
             onCommit = { onEvent(CameraUiEvent.SetBurstFrames(it)) }
@@ -253,7 +319,7 @@ fun SettingsSheet(
     if (showPngDialog) {
         ExpressiveQuantityDialog(
             title = "PNG Compression",
-            currentValue = state.pngCompression,
+            currentValue = config.pngCompression,
             range = 0f..9f,
             step = 1,
             unit = "Level",
@@ -272,7 +338,7 @@ fun SettingsSheet(
                 3 to "Minimal",
                 4 to "ZSL"
             ),
-            currentValue = state.noiseReductionMode,
+            currentValue = config.noiseReductionMode,
             onDismiss = { showNoiseDialog = false },
             onSelect = { onEvent(CameraUiEvent.SetNoiseReduction(it)) }
         )
@@ -285,7 +351,7 @@ fun SettingsSheet(
                 1 to "HDR10 (10-bit Rec.2020)",
                 0 to "SDR (10-bit Rec.709)"
             ),
-            currentValue = state.videoFormat,
+            currentValue = config.videoFormat,
             onDismiss = { showVideoFormatDialog = false },
             onSelect = { onEvent(CameraUiEvent.SetVideoFormat(it)) }
         )
@@ -298,7 +364,7 @@ fun SettingsSheet(
                 "video/hevc" to "HEVC (H.265)",
                 "video/avc" to "AVC (H.264)"
             ),
-            currentValue = state.videoCodec,
+            currentValue = config.videoCodec,
             onDismiss = { showVideoCodecDialog = false },
             onSelect = { onEvent(CameraUiEvent.SetVideoCodec(it)) }
         )
@@ -307,7 +373,7 @@ fun SettingsSheet(
     if (showQualityDialog) {
         ExpressiveQuantityDialog(
             title = "Video Bitrate",
-            currentValue = state.quality,
+            currentValue = config.quality,
             range = 40f..600f,
             step = 10,
             unit = "Mbps",
@@ -323,7 +389,7 @@ fun SettingsSheet(
                 0 to "None (Static HDR10)",
                 1 to "HDR10+ (ST.2094-40)"
             ),
-            currentValue = state.dynamicMetadataMode,
+            currentValue = config.dynamicMetadataMode,
             onDismiss = { showMetadataDialog = false },
             onSelect = { onEvent(CameraUiEvent.SetDynamicMetadataMode(it)) }
         )
@@ -337,9 +403,43 @@ fun SettingsSheet(
                 "1" to "Opus (High Efficiency)",
                 "2" to "None"
             ),
-            currentValue = state.audioCodec,
+            currentValue = config.audioCodec,
             onDismiss = { showAudioCodecDialog = false },
             onSelect = { onEvent(CameraUiEvent.SetAudioCodec(it)) }
+        )
+    }
+
+    if (showLogDialog) {
+        ExpressiveSelectionDialog(
+            title = "Log Profile",
+            options = listOf(
+                0 to "Off (Standard HDR)",
+                1 to "Apple Log",
+                2 to "Apple Log 2 (AWG)",
+                3 to "Samsung Log",
+                4 to "Sony S-Log3",
+                5 to "Panasonic V-Log",
+                6 to "ARRI LogC3"
+            ),
+            currentValue = config.logProfile,
+            onDismiss = { showLogDialog = false },
+            onSelect = { onEvent(CameraUiEvent.SetLogProfile(it)) }
+        )
+    }
+
+    if (showLutDialog) {
+        val options = (listOf("None") + config.availableLuts + "Import .cube LUT...").distinct()
+        ExpressiveSelectionDialog(
+            title = "Custom LUT",
+            options = options.map { it to it },
+            currentValue = config.selectedLut,
+            onDismiss = { showLutDialog = false },
+            onSelect = { selectedOption ->
+                when {
+                    selectedOption == "Import .cube LUT..." -> onImportLut()
+                    else -> onEvent(CameraUiEvent.SetLut(context, selectedOption))
+                }
+            }
         )
     }
 }

@@ -2,6 +2,9 @@ package com.cameraw
 
 import android.content.SharedPreferences
 import android.graphics.Bitmap
+import android.hardware.HardwareBuffer
+import android.net.Uri
+import android.util.Log
 import android.util.Range
 import android.util.Size
 import androidx.compose.ui.geometry.Offset
@@ -10,100 +13,41 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import android.hardware.HardwareBuffer
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.ObjectInputStream
+import java.io.ObjectOutputStream
 import java.nio.ByteBuffer
 
 private val CINEMATIC_RESOLUTIONS = listOf(
-    Size(16320, 12240),
-    Size(8192, 6144),
-    Size(8160, 6120),
-    Size(8000, 6000),
-    Size(8064, 6048),
-    Size(5712, 4284),
-    Size(4096, 3072),
-    Size(4096, 2160),
-    Size(4096, 1716),
-    Size(4000,3000),
-    Size(4000, 2104),
-    Size(4000, 2000),
-    Size(4000, 1818),
-    Size(4000, 1673),
-    Size(3996, 2160),
-    Size(3840, 2176),
-    Size(3840, 2160),
-    Size(3840, 2074),
-    Size(3840, 2026),
-    Size(3840, 1920),
-    Size(3840, 1634),
-    Size(3840, 1608),
-    Size(3840, 1480),
-    Size(3840, 1392),
-    Size(3482, 2176),
-    Size(3110, 2176),
-    Size(2560, 1792),
-    Size(2560, 1600),
-    Size(2560, 1440),
-    Size(2560, 1384),
-    Size(2560, 1280),
-    Size(2560, 1088),
-    Size(2400, 1080),
-    Size(2048,858),
-    Size(2176, 2176),
-    Size(1998, 1080),
-    Size(1920, 1344),
-    Size(1920, 1200),
-    Size(1920, 1080),
-    Size(1920, 1038),
-    Size(1920, 960),
-    Size(1920, 816)
+    Size(16320, 12240), Size(8192, 6144), Size(8160, 6120), Size(8000, 6000),
+    Size(8064, 6048), Size(5712, 4284), Size(4096, 3072), Size(4096, 2160),
+    Size(4096, 1716), Size(4000,3000), Size(4000, 2104), Size(4000, 2000),
+    Size(4000, 1818), Size(4000, 1673), Size(3996, 2160), Size(3840, 2176),
+    Size(3840, 2160), Size(3840, 2074), Size(3840, 2026), Size(3840, 1920),
+    Size(3840, 1634), Size(3840, 1608), Size(3840, 1480), Size(3840, 1392),
+    Size(3482, 2176), Size(3110, 2176), Size(2560, 1792), Size(2560, 1600),
+    Size(2560, 1440), Size(2560, 1384), Size(2560, 1280), Size(2560, 1088),
+    Size(2400, 1080), Size(2048,858), Size(2176, 2176), Size(1998, 1080),
+    Size(1920, 1344), Size(1920, 1200), Size(1920, 1080), Size(1920, 1038),
+    Size(1920, 960), Size(1920, 816)
 )
 private val FRONT_CINEMATIC_RESOLUTIONS = listOf(
-    Size(4096, 3072),
-    Size(4096, 2160),
-    Size(4096, 1716),
-    Size(4000,3000),
-    Size(4000, 2104),
-    Size(4000, 2000),
-    Size(4000, 1818),
-    Size(4000, 1673),
-    Size(3996, 2160),
-    Size(3840, 2176),
-    Size(3840, 2160),
-    Size(3840, 2074),
-    Size(3840, 2026),
-    Size(3840, 1920),
-    Size(3840, 1634),
-    Size(3840, 1608),
-    Size(3840, 1480),
-    Size(3840, 1392),
-    Size(3482, 2176),
-    Size(3110, 2176),
-    Size(2560, 1792),
-    Size(2560, 1600),
-    Size(2560, 1440),
-    Size(2560, 1384),
-    Size(2560, 1280),
-    Size(2560, 1088),
-    Size(2400, 1080),
-    Size(2320, 1744),
-    Size(2320, 1312),
-    Size(2320, 1252),
-    Size(2320, 1222),
-    Size(2320, 1160),
-    Size(2320, 986),
-    Size(2320, 971),
-    Size(2160,2160),
-    Size(2060, 1440),
-    Size(1920, 1344),
-    Size(1920, 1200),
-    Size(1920, 1080),
-    Size(1920, 960),
-    Size(1600, 900),
-    Size(1440, 1080)
+    Size(4096, 3072), Size(4096, 2160), Size(4096, 1716), Size(4000,3000),
+    Size(4000, 2104), Size(4000, 2000), Size(4000, 1818), Size(4000, 1673),
+    Size(3996, 2160), Size(3840, 2176), Size(3840, 2160), Size(3840, 2074),
+    Size(3840, 2026), Size(3840, 1920), Size(3840, 1634), Size(3840, 1608),
+    Size(3840, 1480), Size(3840, 1392), Size(3482, 2176), Size(3110, 2176),
+    Size(2560, 1792), Size(2560, 1600), Size(2560, 1440), Size(2560, 1384),
+    Size(2560, 1280), Size(2560, 1088), Size(2400, 1080), Size(2320, 1744),
+    Size(2320, 1312), Size(2320, 1252), Size(2320, 1222), Size(2320, 1160),
+    Size(2320, 986), Size(2320, 971), Size(2160,2160), Size(2060, 1440),
+    Size(1920, 1344), Size(1920, 1200), Size(1920, 1080), Size(1920, 960),
+    Size(1600, 900), Size(1440, 1080)
 )
 
 private val TRUE_HDR_FPS_OPTIONS = listOf(24, 25, 30, 48, 50, 60, 90).map { Range(it, it) }.distinct()
@@ -115,6 +59,7 @@ sealed class CameraUiEvent {
     object ResolutionClicked : CameraUiEvent()
     object FpsClicked : CameraUiEvent()
     object ToggleSaveGyroData : CameraUiEvent()
+    object DumpMetadataClicked : CameraUiEvent()
     object FlashToggled : CameraUiEvent()
     object IsoClicked : CameraUiEvent()
     data class SetVideoFormat(val format: Int) : CameraUiEvent()
@@ -155,13 +100,16 @@ sealed class CameraUiEvent {
     data class SetHasFlash(val hasFlash: Boolean) : CameraUiEvent()
     data class SetCameraId(val id: String) : CameraUiEvent()
     data class SetDynamicMetadataMode(val mode: Int) : CameraUiEvent()
-
     data class UpdateFocusState(val state: FocusState) : CameraUiEvent()
     data class SetExposureCompensation(val step: Int) : CameraUiEvent()
     object ResumeContinuousFocus : CameraUiEvent()
-
     object ToggleClippingWarning : CameraUiEvent()
     data class UpdateClippingMask(val mask: Bitmap?) : CameraUiEvent()
+
+    data class SetLogProfile(val profile: Int) : CameraUiEvent()
+    data class SetLut(val context: android.content.Context, val lutName: String) : CameraUiEvent()
+    data class LoadAvailableLuts(val context: android.content.Context) : CameraUiEvent()
+    data class ImportLut(val context: android.content.Context, val uri: Uri) : CameraUiEvent()
 }
 
 data class CameraUiState(
@@ -215,12 +163,16 @@ data class CameraUiState(
     val cameraId: String = "0",
     val hasHardwareFlash: Boolean = true,
     val dynamicMetadataMode: Int = 1,
-
     val focusState: FocusState = FocusState.IDLE,
     val exposureCompensation: Int = 0,
-
     val showClippingWarning: Boolean = false,
     val clippingMask: Bitmap? = null,
+
+    val logProfile: Int = 0,
+    val availableLuts: List<String> = listOf("None"),
+    val selectedLut: String = "None",
+    val activeLutData: FloatArray? = null,
+    val activeLutSize: Int = 0
 ) {
     val isVideoMode: Boolean
         get() = cameraMode == CameraMode.PRO_VIDEO || cameraMode == CameraMode.RAW_VIDEO
@@ -255,13 +207,14 @@ class CameraViewModel : ViewModel() {
         activeW: Int,
         activeH: Int,
         offsetX: Int,
-        offsetY: Int
+        offsetY: Int,
+        lensStaticFloats: FloatArray,
+        poseReference: Int
     ): Long
 
     private external fun nativeWriteVideoFrameWithMetadata(
         contextPtr: Long,
         buffer: HardwareBuffer,
-        isLeftShifted: Boolean,
         timestampUs: Long,
         iso: Int,
         shutterNs: Long,
@@ -271,7 +224,11 @@ class CameraViewModel : ViewModel() {
         lscH: Int,
         rowStrideBytes: Int,
         offsetX: Int,
-        offsetY: Int
+        offsetY: Int,
+        dynFloats: FloatArray,
+        dynInts: IntArray,
+        dynLongs: LongArray,
+        gyroData: ByteArray?
     )
 
     private external fun writeAudioFrame(
@@ -301,7 +258,9 @@ class CameraViewModel : ViewModel() {
         activeW: Int,
         activeH: Int,
         offsetX: Int,
-        offsetY: Int
+        offsetY: Int,
+        lensStaticFloats: FloatArray,
+        poseReference: Int
     ) {
         val state = _uiState.value
         val width = state.currentResolution.width
@@ -314,7 +273,8 @@ class CameraViewModel : ViewModel() {
             cameraName, focalLength, aperture, colorMatrix,
             rGain, gGain, bGain, cfa,
             c2stFloats, c2stInts, softwareStr,
-            activeW, activeH, offsetX, offsetY
+            activeW, activeH, offsetX, offsetY,
+            lensStaticFloats, poseReference
         )
     }
 
@@ -329,13 +289,16 @@ class CameraViewModel : ViewModel() {
         lscH: Int,
         rowStrideBytes: Int,
         offsetX: Int,
-        offsetY: Int
+        offsetY: Int,
+        dynFloats: FloatArray,
+        dynInts: IntArray,
+        dynLongs: LongArray,
+        gyroData: ByteArray? = null
     ) {
         if (mlvContextPtr != 0L) {
             nativeWriteVideoFrameWithMetadata(
                 mlvContextPtr,
                 buffer,
-                false,
                 timestampUs,
                 iso,
                 shutterNs,
@@ -345,7 +308,11 @@ class CameraViewModel : ViewModel() {
                 lscH,
                 rowStrideBytes,
                 offsetX,
-                offsetY
+                offsetY,
+                dynFloats,
+                dynInts,
+                dynLongs,
+                gyroData
             )
         }
     }
@@ -373,10 +340,6 @@ class CameraViewModel : ViewModel() {
         }
     }
 
-    companion object {
-        var savedPreferences: Map<String, String> = emptyMap()
-    }
-
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
@@ -386,6 +349,7 @@ class CameraViewModel : ViewModel() {
         val clampedZoom = zoom.coerceIn(1f, _uiState.value.maxZoomRatio)
         _uiState.update { it.copy(zoomRatio = clampedZoom) }
     }
+
     private var photoResolutions: List<Size> = emptyList()
     private var jpegResolutions: List<Size> = emptyList()
     private var trueHdrFpsRanges: List<Range<Int>> = emptyList()
@@ -439,16 +403,18 @@ class CameraViewModel : ViewModel() {
             lastRawRes = Size(rawW, rawH)
         }
 
-        val videoCodec = savedPreferences["videoCodec"] ?: prefs?.getString("video_codec", "video/hevc") ?: "video/hevc"
-        val audioCodec = savedPreferences["audioCodec"] ?: prefs?.getString("audio_codec", "0") ?: "0"
-        val quality = (savedPreferences["quality"]?.toIntOrNull() ?: prefs?.getInt("quality", 100) ?: 100).coerceIn(40, 600)
-        val noiseReductionMode = savedPreferences["noiseReductionMode"]?.toIntOrNull() ?: prefs?.getInt("noise_reduction_mode", 0) ?: 0
-        val burstFrames = prefs?.getInt("burst_frames", 5)?.coerceIn(1, 12) ?: 5
-        val pngCompression = prefs?.getInt("png_compression", 1)?.coerceIn(0, 9) ?: 1
+        val videoCodec = prefs?.getString("video_codec", "video/hevc") ?: "video/hevc"
+        val audioCodec = prefs?.getString("audio_codec", "0") ?: "0"
+        val quality = (prefs?.getInt("quality", 100) ?: 100).coerceIn(40, 600)
+        val noiseReductionMode = prefs?.getInt("noise_reduction_mode", 0) ?: 0
+        val burstFrames = prefs?.getInt("burst_frames", 5)?.coerceIn(1, 14) ?: 5
+        val pngCompression = prefs?.getInt("png_compression", 0)?.coerceIn(0, 9) ?: 1
         val photoBitDepth = prefs?.getInt("photo_bit_depth", 16) ?: 16
         val dynamicMetadataMode = prefs?.getInt("dynamic_metadata_mode", 1) ?: 1
         val videoFormat = prefs?.getInt("video_format", 1) ?: 1
         val saveGyroData = prefs?.getBoolean("save_gyro_data", true) ?: true
+        val logProfile = prefs?.getInt("log_profile", 0) ?: 0
+        val selectedLut = prefs?.getString("selected_lut", "None") ?: "None"
 
         _uiState.update {
             it.copy(
@@ -462,7 +428,9 @@ class CameraViewModel : ViewModel() {
                 photoBitDepth = photoBitDepth,
                 dynamicMetadataMode = dynamicMetadataMode,
                 videoFormat = videoFormat,
-                saveGyroData = saveGyroData
+                saveGyroData = saveGyroData,
+                logProfile = logProfile,
+                selectedLut = selectedLut
             )
         }
 
@@ -588,7 +556,6 @@ class CameraViewModel : ViewModel() {
             is CameraUiEvent.SetDynamicMetadataMode -> {
                 _uiState.update { it.copy(dynamicMetadataMode = event.mode) }
             }
-
             is CameraUiEvent.UpdateFocusState -> _uiState.update { it.copy(focusState = event.state) }
             is CameraUiEvent.SetExposureCompensation -> {
                 _uiState.update { it.copy(exposureCompensation = event.step) }
@@ -612,7 +579,109 @@ class CameraViewModel : ViewModel() {
                 it.copy(clippingMask = event.mask)
             }
 
+            is CameraUiEvent.SetLogProfile -> {
+                _uiState.update {
+                    if (event.profile != 0) {
+                        it.copy(logProfile = event.profile, dynamicMetadataMode = 0)
+                    } else {
+                        it.copy(logProfile = event.profile)
+                    }
+                }
+                enforceCodecForHdrOrLog()
+            }
+            is CameraUiEvent.SetLut -> {
+                if (event.lutName == "None") {
+                    _uiState.update {
+                        it.copy(selectedLut = "None", activeLutData = null, activeLutSize = 0)
+                    }
+                } else {
+                    try {
+                        val lutFile = File(event.context.filesDir, "${event.lutName}.lut")
+                        if (lutFile.exists()) {
+                            val lutData = ObjectInputStream(FileInputStream(lutFile)).use {
+                                it.readObject() as FloatArray
+                            }
+                            val size = Math.cbrt((lutData.size / 3).toDouble()).toInt()
+                            _uiState.update {
+                                it.copy(
+                                    selectedLut = event.lutName,
+                                    activeLutData = lutData,
+                                    activeLutSize = size
+                                )
+                            }
+                        } else {
+                            _uiState.update { it.copy(selectedLut = "None", activeLutData = null, activeLutSize = 0) }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Failed to load LUT data", e)
+                    }
+                }
+                enforceCodecForHdrOrLog()
+            }
+            is CameraUiEvent.LoadAvailableLuts -> {
+                val dir = event.context.filesDir
+                val lutFiles = dir.listFiles { _, name -> name.endsWith(".lut") }
+                val luts = lutFiles?.map { it.nameWithoutExtension } ?: emptyList()
+                _uiState.update { it.copy(availableLuts = listOf("None") + luts) }
+            }
+            is CameraUiEvent.ImportLut -> {
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        var size = 0
+                        val data = mutableListOf<Float>()
+                        event.context.contentResolver.openInputStream(event.uri)?.bufferedReader()?.useLines { lines ->
+                            for (line in lines) {
+                                val trimmed = line.trim()
+                                if (trimmed.startsWith("LUT_3D_SIZE")) {
+                                    size = trimmed.split("\\s+".toRegex()).last().toInt()
+                                } else if (trimmed.isNotEmpty() && (trimmed[0].isDigit() || trimmed[0] == '-' || trimmed[0] == '.')) {
+                                    val parts = trimmed.split("\\s+".toRegex())
+                                    if (parts.size >= 3) {
+                                        data.add(parts[0].toFloat())
+                                        data.add(parts[1].toFloat())
+                                        data.add(parts[2].toFloat())
+                                    }
+                                }
+                            }
+                        }
+                        if (size > 0 && data.size == size * size * size * 3) {
+                            val rawSegment = event.uri.lastPathSegment ?: "Custom_LUT_${System.currentTimeMillis()}"
+                            val cleanName = rawSegment.substringAfterLast("/").substringAfterLast(":")
+                            val lutName = cleanName.substringBeforeLast(".").replace(Regex("[^a-zA-Z0-9_\\-]"), "_")
+
+                            val lutFile = File(event.context.filesDir, "$lutName.lut")
+                            ObjectOutputStream(FileOutputStream(lutFile)).use {
+                                it.writeObject(data.toFloatArray())
+                            }
+
+                            _uiState.update { state ->
+                                state.copy(
+                                    availableLuts = if (state.availableLuts.contains(lutName)) state.availableLuts else state.availableLuts + lutName,
+                                    selectedLut = lutName,
+                                    activeLutData = data.toFloatArray(),
+                                    activeLutSize = size
+                                )
+                            }
+                            enforceCodecForHdrOrLog()
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CameraViewModel", "Failed to parse LUT", e)
+                    }
+                }
+            }
             else -> {}
+        }
+    }
+
+    private fun enforceCodecForHdrOrLog() {
+        val state = _uiState.value
+        if (state.logProfile > 0 || state.selectedLut != "None") {
+            if (state.videoCodec != "video/hevc") {
+                _uiState.update { it.copy(videoCodec = "video/hevc") }
+            }
+            if (state.videoFormat == 0) {
+                _uiState.update { it.copy(videoFormat = 1) }
+            }
         }
     }
 
@@ -761,6 +830,8 @@ class CameraViewModel : ViewModel() {
             putInt("dynamic_metadata_mode", state.dynamicMetadataMode)
             putInt("video_format", state.videoFormat)
             putBoolean("save_gyro_data", state.saveGyroData)
+            putInt("log_profile", state.logProfile)
+            putString("selected_lut", state.selectedLut)
             apply()
         }
     }
@@ -783,7 +854,6 @@ class CameraViewModel : ViewModel() {
     fun toggleFlash() = _uiState.update { it.copy(flashEnabled = !it.flashEnabled) }
     fun updateRecordingTime(time: String) = _uiState.update { it.copy(recordingDuration = time) }
     fun showResolutionDialog() = _uiState.update { it.copy(showResolutionDialog = true) }
-    fun setProcessing(isProcessing: Boolean) = _uiState.update { it.copy(isProcessingPhoto = isProcessing) }
 
     fun updateCapabilities(minI: Int, maxI: Int, minS: Long, maxS: Long, minF: Float, maxF: Float) {
         _uiState.update {

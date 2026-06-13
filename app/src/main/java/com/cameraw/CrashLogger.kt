@@ -24,7 +24,7 @@ class CrashLogger(private val context: Context) : Thread.UncaughtExceptionHandle
             val logFile = File(context.getExternalFilesDir(null), "CameraW_Crash_$timeStamp.txt")
 
             PrintWriter(FileWriter(logFile)).use { writer ->
-                writer.println("=== CAMERAW FATAL CRASH REPORT ===")
+                writer.println("CAMERAW FATAL CRASH REPORT")
                 writer.println("Time: $timeStamp")
                 writer.println("Thread: ${thread.name}")
                 writer.println("\n--- FATAL EXCEPTION ---")
@@ -60,7 +60,7 @@ class CrashLogger(private val context: Context) : Thread.UncaughtExceptionHandle
                     val tempFile = File(context.cacheDir, fileName)
 
                     PrintWriter(FileWriter(tempFile)).use { writer ->
-                        writer.println("=== CAMERAW SOFT CRASH REPORT ===")
+                        writer.println("CAMERAW SOFT CRASH REPORT")
                         writer.println("Time: $timeStamp")
                         writer.println("Tag: $tag")
                         writer.println("Message: $message")

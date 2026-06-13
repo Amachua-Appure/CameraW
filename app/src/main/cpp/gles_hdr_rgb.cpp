@@ -28,7 +28,6 @@ extern "C" {
 #include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
-#include <libavutil/dovi_meta.h>
 }
 #define LOG_TAG "CameraW_Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -134,13 +133,111 @@ const char* VERTEX_SHADER = R"(#version 310 es
     }
 )";
 
-std::string buildFragmentShader() {
+std::string getOETFShaderBlock(int logProfile, int hdrMode) {
+    if (logProfile == 1 || logProfile == 2) { // Apple Log
+        return R"(
+        vec3 apply_gamma(vec3 R) {
+            vec3 P;
+            const float R0 = -0.05641088; const float Rt = 0.01;
+            const float c = 47.28711236; const float beta = 0.00964052;
+            const float gamma = 0.08550479; const float delta = 0.69336945;
+            for(int i=0; i<3; ++i) {
+                if (R[i] >= Rt) P[i] = gamma * log2(R[i] + beta) + delta;
+                else if (R[i] >= R0) P[i] = c * pow(R[i] - R0, 2.0);
+                else P[i] = 0.0;
+            }
+            return P;
+        }
+        )";
+    } else if (logProfile == 3) { // Samsung Log
+        return R"(
+        vec3 apply_gamma(vec3 x) {
+            vec3 y;
+            const float x0 = -0.05; const float xt = 0.01;
+            const float a1 = 0.258984868; const float b1 = 0.0003645; const float g1 = 0.720504856;
+            const float a2 = -0.20942; const float b2 = 0.016904; const float g2 = -0.24597;
+            const float ln10 = 2.302585093;
+            for(int i=0; i<3; ++i) {
+                if (x[i] >= xt) y[i] = a1 * (log(x[i] + b1) / ln10) + g1;
+                else if (x[i] >= x0) y[i] = a2 * (log(-x[i] + b2) / ln10) + g2;
+                else y[i] = 0.0;
+            }
+            return y;
+        }
+        )";
+    } else if (logProfile == 4) { // Sony S-Log3
+        return R"(
+        vec3 apply_gamma(vec3 x) {
+            vec3 y;
+            for(int i=0; i<3; ++i) {
+                if (x[i] >= 0.01125000) {
+                    y[i] = (420.0 + (log2((x[i] + 0.01) / 0.11) / 3.32192809) * 261.5) / 1023.0;
+                } else {
+                    y[i] = (x[i] * 6774.248417 + 95.0) / 1023.0;
+                }
+            }
+            return y;
+        }
+        )";
+    } else if (logProfile == 5) { // Panasonic V-Log
+        return R"(
+            vec3 apply_gamma(vec3 x) {
+                vec3 y;
+                for(int i=0; i<3; ++i) {
+                    if (x[i] < 0.01) {
+                        y[i] = 5.6 * x[i] + 0.125;
+                    } else {
+                        y[i] = 0.241514 * (log2(x[i] + 0.00873) / 3.32192809) + 0.598206;
+                    }
+                }
+                return y;
+            }
+            )";
+    } else if (logProfile == 6) { // ARRI LogC3 (EI 800)
+        return R"(
+        vec3 apply_gamma(vec3 x) {
+            vec3 y;
+            for(int i=0; i<3; ++i) {
+                if (x[i] >= 0.010591) {
+                    y[i] = 0.2471896 * (log2(5.555556 * x[i] + 0.052272) / 3.32192809) + 0.385537;
+                } else {
+                    y[i] = 5.555556 * x[i] + 0.092809;
+                }
+            }
+            return y;
+        }
+        )";
+    } else if (hdrMode == 0) {
+        return R"(
+        vec3 apply_gamma(vec3 x) {
+            vec3 linear = clamp(x, 0.0, 1.0);
+            vec3 s1 = linear * 4.5;
+            vec3 s2 = 1.099 * pow(linear, vec3(0.45)) - vec3(0.099);
+            vec3 condition = step(vec3(0.018), linear);
+            return mix(s1, s2, condition);
+        }
+        )";
+    } else {
+        return R"(
+        vec3 apply_gamma(vec3 x) {
+            vec3 l = exp2(log2(max(x, 0.0)) * (2610.0 / 16384.0));
+            vec3 num = (3424.0 / 4096.0) + (2413.0 / 4096.0 * 32.0) * l;
+            vec3 den = 1.0 + (2392.0 / 4096.0 * 32.0) * l;
+            vec3 pq = exp2(log2(num / den) * (2523.0 / 4096.0 * 128.0));
+            return (pq * 0.856304985) + 0.062561094;
+        }
+        )";
+    }
+}
+
+std::string buildFragmentShader(int logProfile, int hdrMode) {
     std::string src = R"(#version 310 es
 precision highp float;
 precision highp int;
 
 uniform highp usampler2D uRawTex;
 uniform highp sampler2D uLscTex;
+uniform highp sampler3D uLut3D;
 
 uniform ivec2 uOutSize;
 uniform ivec2 uOffset;
@@ -152,6 +249,7 @@ uniform float uInvRange;
 uniform int uLscEnabled;
 uniform int uCfa;
 uniform int uHdrMode;
+uniform int uLutEnabled;
 
 in vec2 vTexCoord;
 out vec4 outColor;
@@ -161,6 +259,7 @@ float getRawValue(ivec2 pos) {
     return float((pos.x & 1) == 0 ? (raw & 0xFFFFu) : (raw >> 16u));
 }
 )";
+    src += getOETFShaderBlock(logProfile, hdrMode);
     src += R"(
 void main() {
     ivec2 pos = ivec2(vTexCoord.x * uIntendedSize.x, vTexCoord.y * uIntendedSize.y) + uOffset;
@@ -182,121 +281,83 @@ void main() {
     float TR = getRawValue(pos + ivec2(1, -1));
     float BL = getRawValue(pos + ivec2(-1, 1));
     float BR = getRawValue(pos + ivec2(1, 1));
+    float L2 = getRawValue(pos + ivec2(-2, 0));
+    float R2 = getRawValue(pos + ivec2(2, 0));
+    float T2 = getRawValue(pos + ivec2(0, -2));
+    float B2 = getRawValue(pos + ivec2(0, 2));
 
-    float R, G, B;
+    float isR  = float(row == 0 && col == 0);
+    float isB  = float(row == 1 && col == 1);
+    float isGr = float(row == 0 && col == 1);
+    float isGb = float(row == 1 && col == 0);
+    float isG  = isGr + isGb;
 
-    if (row == 0 && col == 0) {
-        R = C;
-        float gH_G = abs(L - R_) + abs(TL - TR) + abs(BL - BR);
-        float gV_G = abs(T - B_) + abs(TL - BL) + abs(TR - BR);
-        float L2 = getRawValue(pos + ivec2(-2, 0));
-        float R2 = getRawValue(pos + ivec2(2, 0));
-        float iH_G = 0.5 * (L + R_) + 0.5 * (C - 0.5 * (L2 + R2));
-        float T2 = getRawValue(pos + ivec2(0, -2));
-        float B2 = getRawValue(pos + ivec2(0, 2));
-        float iV_G = 0.5 * (T + B_) + 0.5 * (C - 0.5 * (T2 + B2));
-        G = (gH_G < gV_G) ? iH_G : iV_G;
-        float gMin = min(min(T, B_), min(L, R_));
-        float gMax = max(max(T, B_), max(L, R_));
-        G = clamp(G, gMin, gMax);
+    float C_lap4 = 4.0 * C - T2 - B2 - L2 - R2;
+    float C_lapH = 2.0 * C - L2 - R2;
+    float C_lapV = 2.0 * C - T2 - B2;
 
-        B = G + 0.25 * (TL + TR + BL + BR) - 0.25 * (T + B_ + L + R_);
-        float bMin = min(min(TL, TR), min(BL, BR));
-        float bMax = max(max(TL, TR), max(BL, BR));
-        B = clamp(B, bMin, bMax);
-    } else if (row == 1 && col == 1) {
-        B = C;
-        float gH_G = abs(L - R_) + abs(TL - TR) + abs(BL - BR);
-        float gV_G = abs(T - B_) + abs(TL - BL) + abs(TR - BR);
-        float L2 = getRawValue(pos + ivec2(-2, 0));
-        float R2 = getRawValue(pos + ivec2(2, 0));
-        float iH_G = 0.5 * (L + R_) + 0.5 * (C - 0.5 * (L2 + R2));
-        float T2 = getRawValue(pos + ivec2(0, -2));
-        float B2 = getRawValue(pos + ivec2(0, 2));
-        float iV_G = 0.5 * (T + B_) + 0.5 * (C - 0.5 * (T2 + B2));
-        G = (gH_G < gV_G) ? iH_G : iV_G;
-        float gMin = min(min(T, B_), min(L, R_));
-        float gMax = max(max(T, B_), max(L, R_));
-        G = clamp(G, gMin, gMax);
+    float G_RB = 0.25 * (T + B_ + L + R_) + 0.125 * C_lap4;
+    float RB_cross = 0.25 * (TL + TR + BL + BR) + 0.1875 * C_lap4;
+    float R_Gr = 0.5 * (L + R_) + 0.25 * C_lapH;
+    float B_Gr = 0.5 * (T + B_) + 0.25 * C_lapV;
+    float R_Gb = 0.5 * (T + B_) + 0.25 * C_lapV;
+    float B_Gb = 0.5 * (L + R_) + 0.25 * C_lapH;
 
-        R = G + 0.25 * (TL + TR + BL + BR) - 0.25 * (T + B_ + L + R_);
-        float rMin = min(min(TL, TR), min(BL, BR));
-        float rMax = max(max(TL, TR), max(BL, BR));
-        R = clamp(R, rMin, rMax);
-    } else if (row == 0 && col == 1) {
-        G = C;
-        float L2 = getRawValue(pos + ivec2(-2, 0));
-        float R2 = getRawValue(pos + ivec2(2, 0));
-        R = 0.5 * (L + R_) + 0.5 * (C - 0.5 * (L2 + R2));
-        R = clamp(R, min(L, R_), max(L, R_));
+    G_RB = clamp(G_RB, min(min(T, B_), min(L, R_)), max(max(T, B_), max(L, R_)));
+    RB_cross = clamp(RB_cross, min(min(TL, TR), min(BL, BR)), max(max(TL, TR), max(BL, BR)));
+    R_Gr = clamp(R_Gr, min(L, R_), max(L, R_));
+    B_Gr = clamp(B_Gr, min(T, B_), max(T, B_));
+    R_Gb = clamp(R_Gb, min(T, B_), max(T, B_));
+    B_Gb = clamp(B_Gb, min(L, R_), max(L, R_));
 
-        float T2 = getRawValue(pos + ivec2(0, -2));
-        float B2 = getRawValue(pos + ivec2(0, 2));
-        B = 0.5 * (T + B_) + 0.5 * (C - 0.5 * (T2 + B2));
-        B = clamp(B, min(T, B_), max(T, B_));
-    } else {
-        G = C;
-        float T2 = getRawValue(pos + ivec2(0, -2));
-        float B2 = getRawValue(pos + ivec2(0, 2));
-        R = 0.5 * (T + B_) + 0.5 * (C - 0.5 * (T2 + B2));
-        R = clamp(R, min(T, B_), max(T, B_));
-
-        float L2 = getRawValue(pos + ivec2(-2, 0));
-        float R2 = getRawValue(pos + ivec2(2, 0));
-        B = 0.5 * (L + R_) + 0.5 * (C - 0.5 * (L2 + R2));
-        B = clamp(B, min(L, R_), max(L, R_));
-    }
+    float R = isR * C + isB * RB_cross + isGr * R_Gr + isGb * R_Gb;
+    float G = isG * C + (isR + isB) * G_RB;
+    float B = isB * C + isR * RB_cross + isGr * B_Gr + isGb * B_Gb;
 
     vec3 normalized = max(vec3(0.0), (vec3(R, G, B) - uBlackLevel) * uInvRange);
-
     if (uLscEnabled == 1) {
-        vec2 lscUV = vec2(pos) / uSensorSize;
-        vec4 lscGains = texture(uLscTex, lscUV);
-        float gGain = (lscGains.g + lscGains.b) * 0.5;
-
-        float maxNorm = max(normalized.r, max(normalized.g, normalized.b));
-        float lscFade = 1.0 - smoothstep(0.7, 1.0, maxNorm);
-
-        normalized.r *= mix(1.0, lscGains.r, lscFade);
-        normalized.g *= mix(1.0, gGain, lscFade);
-        normalized.b *= mix(1.0, lscGains.a, lscFade);
+        vec4 lscGains = texture(uLscTex, vec2(pos) / uSensorSize);
+        normalized.r *= lscGains.r;
+        normalized.g *= (lscGains.g + lscGains.b) * 0.5;
+        normalized.b *= lscGains.a;
     }
 
-    vec3 corrected = uCombinedMatrix * normalized;
-
+vec3 corrected = uCombinedMatrix * normalized;
     float luma = dot(corrected, vec3(0.2627, 0.6780, 0.0593));
-    float maxChannel = max(corrected.r, max(corrected.g, corrected.b));
-    float desatBlend = smoothstep(0.95, 1.5, maxChannel);
-    corrected = mix(corrected, vec3(luma), desatBlend);
+    corrected = mix(corrected, vec3(luma), smoothstep(0.95, 1.5, max(corrected.r, max(corrected.g, corrected.b))));
 )";
-
-    src += R"(
-    float targetLuminanceScale = (uHdrMode > 0) ? 0.14 : 1.0;
-    vec3 linearColor = corrected * targetLuminanceScale;
-    vec3 logColor = log2(linearColor + 0.00001);
+    if (logProfile == 0 && hdrMode > 0) {
+        src += R"(
+    vec3 linearColor = corrected * 0.14;
+    vec3 logColorTemp = log2(linearColor + 0.00001);
     float contrast = 1.25;
     float pivot = 0.05;
     vec3 logPivot = vec3(log2(pivot));
-    vec3 contrastedLog = logPivot + (logColor - logPivot) * contrast;
+    vec3 contrastedLog = logPivot + (logColorTemp - logPivot) * contrast;
     linearColor = max(vec3(0.0), exp2(contrastedLog) - 0.00001);
 
-    if (uHdrMode > 0) {
-        vec3 l = exp2(log2(max(linearColor, 0.0)) * (2610.0 / 16384.0));
-        vec3 num = (3424.0 / 4096.0) + (2413.0 / 4096.0 * 32.0) * l;
-        vec3 den = 1.0 + (2392.0 / 4096.0 * 32.0) * l;
-        vec3 pq = exp2(log2(num / den) * (2523.0 / 4096.0 * 128.0));
-        vec3 pqFinal = (pq * 0.856304985) + 0.062561094;
-        outColor = vec4(pqFinal, 1.0);
+    vec3 finalColor = apply_gamma(linearColor);
+)";
+    } else if (logProfile == 0 && hdrMode == 0) {
+        src += R"(
+    vec3 linearColor = clamp(corrected, 0.0, 1.0);
+    vec3 finalColor = apply_gamma(linearColor);
+)";
     } else {
-        vec3 mapped = linearColor / (linearColor + 0.25);
-        bvec3 cutoff = lessThan(mapped, vec3(0.018));
-        vec3 higher = 1.099 * pow(mapped, vec3(0.45)) - vec3(0.099);
-        vec3 lower = 4.5 * mapped;
-        vec3 rec709 = mix(higher, lower, cutoff);
-        outColor = vec4(clamp(rec709, 0.0, 1.0), 1.0);
+        src += R"(
+    vec3 finalColor = apply_gamma(corrected);
+)";
     }
-    )";
-    src += "}\n";
+    src += R"(
+    vec3 lutSize = vec3(textureSize(uLut3D, 0));
+    vec3 scale = (lutSize - 1.0) / lutSize;
+    vec3 offset = 0.5 / lutSize;
+    vec3 sampleCoord = clamp(finalColor, 0.0, 1.0) * scale + offset;
+    vec3 lutColor = texture(uLut3D, sampleCoord).rgb;
+
+    outColor = vec4(mix(finalColor, lutColor, float(uLutEnabled)), 1.0);
+}
+)";
     return src;
 }
 
@@ -369,6 +430,7 @@ struct GlesContext {
 
     jobject kotlinBridgeObj = nullptr;
     jmethodID onMetadataMethod = nullptr;
+    jmethodID onFrameReleasedMethod = nullptr;
 
     GLint uRawTexLoc = -1;
     GLint uLscTexLoc = -1;
@@ -382,6 +444,8 @@ struct GlesContext {
     GLint uLscEnabledLoc = -1;
     GLint uCfaLoc = -1;
     GLint uHdrModeLoc = -1;
+    GLint uLut3DLoc = -1;
+    GLint uLutEnabledLoc = -1;
 
     int sensorW = 0, sensorH = 0;
     int outW = 0, outH = 0;
@@ -393,6 +457,7 @@ struct GlesContext {
     std::thread renderThread;
     JobQueue<RawJob> rawBufferQueue;
     int hdrMode = 0;
+    int logProfile = 0;
     int cfa = 0;
 
     std::vector<uint8_t> maxRgbArray;
@@ -403,6 +468,17 @@ struct GlesContext {
     bool lscUploaded = false;
     int cachedLscW = 0;
     int cachedLscH = 0;
+
+    std::mutex lutMutex;
+    bool lutEnabled = false;
+    std::vector<float> pendingLutData;
+    int lutSize = 0;
+    bool hasNewLut = false;
+
+    GLuint ebo = 0;
+    int gridVertexCount = 0;
+    GLuint lut3DTex = 0;
+    bool hasValidLsc = false;
 };
 
 std::map<jlong, GlesContext*> g_contexts;
@@ -427,6 +503,22 @@ GLuint createProgram(const char* vSrc, const char* fSrc) {
     return p;
 }
 
+void releaseKotlinFrame(GlesContext* ctx, jlong ts) {
+    if (ctx->kotlinBridgeObj && ctx->onFrameReleasedMethod) {
+        JNIEnv* env;
+        int getEnvStat = g_javaVM->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        bool needDetach = false;
+        if (getEnvStat == JNI_EDETACHED) {
+            if (g_javaVM->AttachCurrentThread(&env, nullptr) == 0) needDetach = true;
+            else env = nullptr;
+        }
+        if (env) {
+            env->CallVoidMethod(ctx->kotlinBridgeObj, ctx->onFrameReleasedMethod, ts);
+            if (needDetach) g_javaVM->DetachCurrentThread();
+        }
+    }
+}
+
 void renderWorkerLoop(GlesContext* ctx) {
     pinToFastestCores();
     setpriority(PRIO_PROCESS, 0, -10);
@@ -437,7 +529,7 @@ void renderWorkerLoop(GlesContext* ctx) {
     eglMakeCurrent(ctx->display, ctx->encoderSurface, ctx->encoderSurface, ctx->context);
     eglSwapInterval(ctx->display, 0);
 
-    std::string fragmentShaderStr = buildFragmentShader();
+    std::string fragmentShaderStr = buildFragmentShader(ctx->logProfile, ctx->hdrMode);
     ctx->renderProgram = createProgram(VERTEX_SHADER, fragmentShaderStr.c_str());
 
     ctx->uRawTexLoc = glGetUniformLocation(ctx->renderProgram, "uRawTex");
@@ -452,13 +544,35 @@ void renderWorkerLoop(GlesContext* ctx) {
     ctx->uLscEnabledLoc = glGetUniformLocation(ctx->renderProgram, "uLscEnabled");
     ctx->uCfaLoc = glGetUniformLocation(ctx->renderProgram, "uCfa");
     ctx->uHdrModeLoc = glGetUniformLocation(ctx->renderProgram, "uHdrMode");
+    ctx->uLut3DLoc = glGetUniformLocation(ctx->renderProgram, "uLut3D");
+    ctx->uLutEnabledLoc = glGetUniformLocation(ctx->renderProgram, "uLutEnabled");
 
-    float quadVertices[] = { -1.0f, -1.0f,  1.0f, -1.0f,  -1.0f, 1.0f,  1.0f, 1.0f };
+    const int GRID_SIZE = 32;
+    std::vector<float> gridVertices;
+    std::vector<unsigned short> gridIndices;
+    for (int y = 0; y <= GRID_SIZE; ++y) {
+        for (int x = 0; x <= GRID_SIZE; ++x) {
+            gridVertices.push_back((static_cast<float>(x) / GRID_SIZE) * 2.0f - 1.0f);
+            gridVertices.push_back((static_cast<float>(y) / GRID_SIZE) * 2.0f - 1.0f);
+        }
+    }
+    for (int y = 0; y < GRID_SIZE; ++y) {
+        for (int x = 0; x < GRID_SIZE; ++x) {
+            unsigned short tl = y * (GRID_SIZE + 1) + x;
+            unsigned short tr = tl + 1, bl = (y + 1) * (GRID_SIZE + 1) + x, br = bl + 1;
+            gridIndices.insert(gridIndices.end(), {tl, bl, tr, tr, bl, br});
+        }
+    }
+    ctx->gridVertexCount = gridIndices.size();
+
     glGenVertexArrays(1, &ctx->vao);
     glGenBuffers(1, &ctx->vbo);
+    glGenBuffers(1, &ctx->ebo);
     glBindVertexArray(ctx->vao);
     glBindBuffer(GL_ARRAY_BUFFER, ctx->vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, gridVertices.size() * sizeof(float), gridVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ctx->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, gridIndices.size() * sizeof(unsigned short), gridIndices.data(), GL_STATIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
     glEnableVertexAttribArray(0);
 
@@ -487,6 +601,14 @@ void renderWorkerLoop(GlesContext* ctx) {
     glBindFramebuffer(GL_FRAMEBUFFER, ctx->downscaleFBO);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx->downscaleTex, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glGenTextures(1, &ctx->lut3DTex);
+    glBindTexture(GL_TEXTURE_3D, ctx->lut3DTex);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
     glGenBuffers(GlesContext::PBO_COUNT, ctx->pbo);
     for (int i = 0; i < GlesContext::PBO_COUNT; i++) {
@@ -527,6 +649,8 @@ void renderWorkerLoop(GlesContext* ctx) {
             LOGE("Failed to lock HardwareBuffer");
         }
         AHardwareBuffer_release(job.hb);
+
+        releaseKotlinFrame(ctx, job.ts);
 
         glUseProgram(ctx->renderProgram);
 
@@ -592,16 +716,31 @@ void renderWorkerLoop(GlesContext* ctx) {
         }
         glUniformMatrix3fv(ctx->uCombinedMatrixLoc, 1, GL_TRUE, combinedMatrix);
 
+        glActiveTexture(GL_TEXTURE2);
+        ctx->lutMutex.lock();
+        if (ctx->hasNewLut) {
+            glBindTexture(GL_TEXTURE_3D, ctx->lut3DTex);
+            glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB16F, ctx->lutSize, ctx->lutSize, ctx->lutSize, 0, GL_RGB, GL_FLOAT, ctx->pendingLutData.data());
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            ctx->hasNewLut = false;
+        } else if (ctx->lutEnabled) {
+            glBindTexture(GL_TEXTURE_3D, ctx->lut3DTex);
+        }
+        ctx->lutMutex.unlock();
+        glUniform1i(ctx->uLut3DLoc, 2);
+        glUniform1i(ctx->uLutEnabledLoc, ctx->lutEnabled ? 1 : 0);
+
         glBindVertexArray(ctx->vao);
         glViewport(0, 0, ctx->outW, ctx->outH);
         {
-            ScopedTimer timer("glDrawArrays + eglSwapBuffers");
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            ScopedTimer timer("glDrawElements + eglSwapBuffers");
+            glDrawElements(GL_TRIANGLES, ctx->gridVertexCount, GL_UNSIGNED_SHORT, 0);
 
             if (ctx->hdrMode > 0 && ctx->hdrMode != 3) {
                 glBindFramebuffer(GL_FRAMEBUFFER, ctx->downscaleFBO);
                 glViewport(0, 0, ctx->DOWNSCALE_SIZE, ctx->DOWNSCALE_SIZE);
-                glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                glDrawElements(GL_TRIANGLES, ctx->gridVertexCount, GL_UNSIGNED_SHORT, 0);
 
                 glBindBuffer(GL_PIXEL_PACK_BUFFER, ctx->pbo[ctx->pboIdx]);
                 glReadPixels(0, 0, ctx->DOWNSCALE_SIZE, ctx->DOWNSCALE_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, 0);
@@ -625,12 +764,6 @@ void renderWorkerLoop(GlesContext* ctx) {
                 glViewport(0, 0, ctx->outW, ctx->outH);
 
                 if (mappedPixels) {
-                    auto get12BitPq = [](uint8_t val) -> uint32_t {
-                        if (val == 0) return 0;
-                        float pq_full = val / 255.0f;
-                        return static_cast<uint32_t>(pq_full * 4095.0f + 0.5f);
-                    };
-
                     auto pqToNits = [](uint8_t val) -> float {
                         if (val == 0) return 0.0f;
                         float pq_full = val / 255.0f;
@@ -644,21 +777,6 @@ void renderWorkerLoop(GlesContext* ctx) {
                         float den = std::max(c2 - c3 * p, 0.0001f);
                         float linear = std::pow(num / den, 1.0f / m1);
                         return std::min(linear * 10000.0f, 10000.0f);
-                    };
-
-                    auto nitsTo12BitPq = [](float nits) -> uint32_t {
-                        if (nits <= 0.0f) return 0;
-                        const float m1 = 2610.0f / 16384.0f;
-                        const float m2 = (2523.0f / 4096.0f) * 128.0f;
-                        const float c1 = 3424.0f / 4096.0f;
-                        const float c2 = (2413.0f / 4096.0f) * 32.0f;
-                        const float c3 = (2392.0f / 4096.0f) * 32.0f;
-                        float y = std::max(0.0f, std::min(nits / 10000.0f, 1.0f));
-                        float p = std::pow(y, m1);
-                        float num = c1 + c2 * p;
-                        float den = 1.0f + c3 * p;
-                        float pq_full = std::pow(num / den, m2);
-                        return static_cast<uint32_t>(pq_full * 4095.0f + 0.5f);
                     };
 
                     uint8_t maxR = 0, maxG = 0, maxB = 0;
@@ -712,13 +830,8 @@ void renderWorkerLoop(GlesContext* ctx) {
                     float maxNitsForMetadata = ctx->smoothedMaxNits;
 
                     std::vector<uint8_t> hdr10p;
-                    uint32_t dvMinPq = 0, dvMaxPq = 0, dvAvgPq = 0;
 
-                    if (ctx->hdrMode == 2) {
-                        dvMinPq = get12BitPq(minPixel);
-                        dvMaxPq = get12BitPq(maxPixel);
-                        dvAvgPq = nitsTo12BitPq(avgNitsForMetadata);
-                    } else if (ctx->hdrMode == 1) {
+                    if (ctx->hdrMode == 1) {
                         uint32_t msR = static_cast<uint32_t>(pqToNits(maxR) * 10.0f);
                         uint32_t msG = static_cast<uint32_t>(pqToNits(maxG) * 10.0f);
                         uint32_t msB = static_cast<uint32_t>(pqToNits(maxB) * 10.0f);
@@ -759,8 +872,7 @@ void renderWorkerLoop(GlesContext* ctx) {
                         if (env) {
                             jbyteArray jBytes = env->NewByteArray(hdr10p.size());
                             env->SetByteArrayRegion(jBytes, 0, hdr10p.size(), reinterpret_cast<const jbyte*>(hdr10p.data()));
-                            env->CallVoidMethod(ctx->kotlinBridgeObj, ctx->onMetadataMethod,
-                                                jBytes, (jint)dvMinPq, (jint)dvMaxPq, (jint)dvAvgPq, metadataTs);
+                            env->CallVoidMethod(ctx->kotlinBridgeObj, ctx->onMetadataMethod, jBytes, metadataTs);
                             env->DeleteLocalRef(jBytes);
                             if (needDetach) g_javaVM->DetachCurrentThread();
                         }
@@ -785,6 +897,7 @@ void renderWorkerLoop(GlesContext* ctx) {
         if (ctx->renderProgram) glDeleteProgram(ctx->renderProgram);
         if (ctx->vao) glDeleteVertexArrays(1, &ctx->vao);
         if (ctx->vbo) glDeleteBuffers(1, &ctx->vbo);
+        if (ctx->ebo) glDeleteBuffers(1, &ctx->ebo);
         if (ctx->pbo[0]) glDeleteBuffers(GlesContext::PBO_COUNT, ctx->pbo);
     }
     eglMakeCurrent(ctx->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -796,7 +909,7 @@ Java_com_cameraw_VulkanHdrBridge_nativeCreate(JNIEnv* env, jobject thiz,
                                               jint intendedW, jint intendedH,
                                               jint sensorW, jint sensorH,
                                               jint black, jint white, jint hdrMode,
-                                              jint cfa) {
+                                              jint logProfile, jint cfa) {
     GlesContext* ctx = new GlesContext();
     ctx->outW = outW; ctx->outH = outH;
     ctx->intendedW = intendedW; ctx->intendedH = intendedH;
@@ -805,6 +918,7 @@ Java_com_cameraw_VulkanHdrBridge_nativeCreate(JNIEnv* env, jobject thiz,
     ctx->whiteLevel = static_cast<float>(white);
     ctx->isRunning = true;
     ctx->hdrMode = hdrMode;
+    ctx->logProfile = logProfile;
     ctx->cfa = cfa;
     ctx->maxRgbArray.resize(ctx->DOWNSCALE_SIZE * ctx->DOWNSCALE_SIZE);
     ctx->hdr10p.reserve(1024);
@@ -812,7 +926,8 @@ Java_com_cameraw_VulkanHdrBridge_nativeCreate(JNIEnv* env, jobject thiz,
 
     ctx->kotlinBridgeObj = env->NewGlobalRef(thiz);
     jclass clazz = env->GetObjectClass(thiz);
-    ctx->onMetadataMethod = env->GetMethodID(clazz, "onDynamicMetadata", "([BIIIJ)V");
+    ctx->onMetadataMethod = env->GetMethodID(clazz, "onDynamicMetadata", "([BJ)V");
+    ctx->onFrameReleasedMethod = env->GetMethodID(clazz, "onFrameReleased", "(J)V");
     if (!ctx->onMetadataMethod) {
         LOGE("Failed to find onDynamicMetadata method");
     }
@@ -873,6 +988,25 @@ Java_com_cameraw_VulkanHdrBridge_nativeBindEncoderSurface(JNIEnv* env, jobject t
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_cameraw_VulkanHdrBridge_nativeSetLut(JNIEnv* env, jobject thiz, jlong handle, jfloatArray lutData, jint lutSize, jboolean enabled) {
+    std::lock_guard<std::mutex> lock(g_registryMutex);
+    auto it = g_contexts.find(handle);
+    if (it != g_contexts.end()) {
+        GlesContext* ctx = it->second;
+        std::lock_guard<std::mutex> lutLock(ctx->lutMutex);
+        ctx->lutEnabled = enabled;
+        if (lutData && lutSize > 0) {
+            jsize len = env->GetArrayLength(lutData);
+            jfloat* data = env->GetFloatArrayElements(lutData, nullptr);
+            ctx->pendingLutData.assign(data, data + len);
+            ctx->lutSize = lutSize;
+            ctx->hasNewLut = true;
+            env->ReleaseFloatArrayElements(lutData, data, JNI_ABORT);
+        }
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_cameraw_VulkanHdrBridge_nativeSetColorMatrix(JNIEnv* env, jobject thiz, jlong handle, jfloatArray matrix) {
     auto ctx = g_contexts[handle];
     if (!ctx) return;
@@ -893,7 +1027,7 @@ Java_com_cameraw_VulkanHdrBridge_nativeProcessFrameBuffer(JNIEnv* env, jobject t
                                                           jfloatArray lscMapArray, jint lscW, jint lscH) {
     auto ctx = g_contexts[handle];
     if (!ctx) return env->NewStringUTF("INVALID_HANDLE");
-    if (ctx->rawBufferQueue.size() >= 4) {
+    if (ctx->rawBufferQueue.size() >= 12) {
         if (fenceFd != -1) close(fenceFd);
         LOGI("Dropped frame, queue full");
         return env->NewStringUTF("DROPPED_FRAME");
@@ -956,7 +1090,8 @@ Java_com_cameraw_VulkanHdrBridge_nativeDestroy(JNIEnv* env, jobject thiz, jlong 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_cameraw_VulkanHdrBridge_nativeRemuxVideo(JNIEnv* env, jclass clazz,
                                                   jstring inputPath, jstring outputPath,
-                                                  jint sarNum, jint sarDen, jint hdrMode) {
+                                                  jint sarNum, jint sarDen, jint hdrMode, jint logProfile) {
+    if (hdrMode > 0) logProfile = 0;
     const char* in_filename = env->GetStringUTFChars(inputPath, nullptr);
     const char* out_filename = env->GetStringUTFChars(outputPath, nullptr);
 
@@ -1000,11 +1135,26 @@ Java_com_cameraw_VulkanHdrBridge_nativeRemuxVideo(JNIEnv* env, jclass clazz,
                 out_stream->codecpar->sample_aspect_ratio = {sarNum, sarDen};
             }
 
-            if (hdrMode > 0) {
-                out_stream->codecpar->color_trc = AVCOL_TRC_SMPTE2084;
-                out_stream->codecpar->color_primaries = AVCOL_PRI_BT2020;
-                out_stream->codecpar->color_space = AVCOL_SPC_BT2020_NCL;
-                out_stream->codecpar->color_range = AVCOL_RANGE_MPEG;
+            if (hdrMode > 0 || logProfile > 0) {
+                if (logProfile == 1 || logProfile == 3) {
+                    out_stream->codecpar->color_trc = AVCOL_TRC_UNSPECIFIED;
+                    out_stream->codecpar->color_primaries = AVCOL_PRI_BT2020;
+                    out_stream->codecpar->color_space = AVCOL_SPC_BT2020_NCL;
+                } else if (logProfile == 2 || logProfile >= 4) {
+                    out_stream->codecpar->color_trc = AVCOL_TRC_UNSPECIFIED;
+                    out_stream->codecpar->color_primaries = AVCOL_PRI_UNSPECIFIED;
+                    out_stream->codecpar->color_space = AVCOL_SPC_UNSPECIFIED;
+                } else {
+                    out_stream->codecpar->color_trc = AVCOL_TRC_SMPTE2084;
+                    out_stream->codecpar->color_primaries = AVCOL_PRI_BT2020;
+                    out_stream->codecpar->color_space = AVCOL_SPC_BT2020_NCL;
+                }
+
+                if (logProfile > 0) {
+                    out_stream->codecpar->color_range = AVCOL_RANGE_JPEG;
+                } else {
+                    out_stream->codecpar->color_range = AVCOL_RANGE_MPEG;
+                }
                 out_stream->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
             }
         } else {
@@ -1012,7 +1162,7 @@ Java_com_cameraw_VulkanHdrBridge_nativeRemuxVideo(JNIEnv* env, jclass clazz,
         }
     }
 
-    if (hdrMode > 0 && video_stream_index >= 0) {
+    if ((hdrMode > 0 || logProfile > 0) && video_stream_index >= 0) {
         const AVBitStreamFilter *filter = av_bsf_get_by_name("hevc_metadata");
         if (filter) {
             ret = av_bsf_alloc(filter, &hevc_bsf_ctx);
@@ -1020,6 +1170,21 @@ Java_com_cameraw_VulkanHdrBridge_nativeRemuxVideo(JNIEnv* env, jclass clazz,
                 ret = avcodec_parameters_copy(hevc_bsf_ctx->par_in, ofmt_ctx->streams[video_stream_index]->codecpar);
                 if (ret >= 0) {
                     av_opt_set(hevc_bsf_ctx->priv_data, "chroma_sample_loc_type", "2", 0);
+
+                    if (logProfile == 2 || logProfile >= 4) {
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "colour_primaries", 2, 0);
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "transfer_characteristics", 2, 0);
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "matrix_coefficients", 2, 0);
+                    } else if (logProfile == 1 || logProfile == 3) {
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "colour_primaries", 9, 0);
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "transfer_characteristics", 2, 0);
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "matrix_coefficients", 9, 0);
+                    } else if (hdrMode > 0) {
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "colour_primaries", 9, 0);
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "transfer_characteristics", 16, 0);
+                        av_opt_set_int(hevc_bsf_ctx->priv_data, "matrix_coefficients", 9, 0);
+                    }
+
                     ret = av_bsf_init(hevc_bsf_ctx);
                     if (ret >= 0) {
                         avcodec_parameters_copy(ofmt_ctx->streams[video_stream_index]->codecpar, hevc_bsf_ctx->par_out);

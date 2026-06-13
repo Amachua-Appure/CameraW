@@ -7,6 +7,9 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -ffast-math -ftree-vectorize")
 set(LIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
 set(FFMPEG_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg/include")
 
+set(OpenCV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/opencv/sdk/native/jni")
+find_package(OpenCV REQUIRED)
+
 add_library(avutil SHARED IMPORTED)
 set_target_properties(avutil PROPERTIES IMPORTED_LOCATION ${LIBS_DIR}/libavutil.so)
 
@@ -37,6 +40,7 @@ target_include_directories(cameraw_isp PRIVATE
         ${FFMPEG_INCLUDE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${OpenCV_INCLUDE_DIRS}
 )
 
 target_compile_options(cameraw_isp PRIVATE
@@ -50,6 +54,7 @@ target_link_libraries(cameraw_isp
         avutil
         swscale
         swresample
+        ${OpenCV_LIBS}
         GLESv3
         EGL
         android

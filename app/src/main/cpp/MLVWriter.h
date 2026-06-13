@@ -27,7 +27,6 @@
 
 #include <stdint.h>
 
-
 #pragma pack(push, 1)
 #include "mlv_structs.h"
 #pragma pack(pop)
@@ -44,6 +43,7 @@ struct \
 
 struct MLVWriter
 {
+    /* Use the correct type name: mlv_file_hdr_t */
     MLVWriter_header_block(mlv_file_hdr_t, MLVI)
     MLVWriter_header_block(mlv_rawi_hdr_t, RAWI)
     MLVWriter_header_block(mlv_wavi_hdr_t, WAVI)
@@ -57,6 +57,7 @@ struct MLVWriter
     MLVWriter_header_block(mlv_styl_hdr_t, STYL)
     MLVWriter_header_block(mlv_elvl_hdr_t, ELVL)
     MLVWriter_header_block(mlv_wbal_hdr_t, WBAL)
+    MLVWriter_header_block(mlv_c2ls_hdr_t, C2LS)   // ADDED
 
     mlv_vidf_hdr_t VIDF;
     mlv_audf_hdr_t AUDF;

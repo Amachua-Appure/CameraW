@@ -9,7 +9,13 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.util.Size
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -80,7 +86,6 @@ private fun formatResolutionWithAspectRatio(size: Size): String {
 @Composable
 fun CameraWScreen(
     previewSize: Size,
-    sensorOrientation: Int,
     isRecording: Boolean,
     onEvent: (CameraUiEvent) -> Unit,
     onSurfaceTextureAvailable: (SurfaceTexture, Int, Int) -> Unit,
@@ -102,6 +107,12 @@ fun CameraWScreen(
     var activeManualControl by remember { mutableStateOf<ManualControlType?>(null) }
     var showHistogram by remember { mutableStateOf(false) }
     var showGallery by remember { mutableStateOf(false) }
+
+    val lutPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { onEvent(CameraUiEvent.ImportLut(localContext, it)) }
+    }
 
     val rotation by deviceRotation
     val animatedRotation by animateFloatAsState(
@@ -202,6 +213,15 @@ fun CameraWScreen(
                             modifier = Modifier
                                 .requiredSize(scaledPreviewW, scaledPreviewH)
                         )
+                        if (uiState.showClippingWarning && uiState.clippingMask != null && !isRecording) {
+                            Image(
+                                bitmap = uiState.clippingMask!!.asImageBitmap(),
+                                contentDescription = "Clipping Mask",
+                                modifier = Modifier.requiredSize(scaledPreviewW, scaledPreviewH),
+                                contentScale = ContentScale.Crop,
+                                filterQuality = FilterQuality.None
+                            )
+                        }
                     }
                 }
 
@@ -301,11 +321,7 @@ fun CameraWScreen(
                         currentMode = uiState.cameraMode,
                         cameraId = uiState.cameraId,
                         onModeSelected = { mode ->
-                            onEvent(
-                                CameraUiEvent.SetCaptureMode(
-                                    mode
-                                )
-                            )
+                            onEvent(CameraUiEvent.SetCaptureMode(mode))
                             activeManualControl = null
                         },
                         onRecordClick = { onEvent(CameraUiEvent.RecordButtonClicked) },
@@ -313,6 +329,8 @@ fun CameraWScreen(
                         onSwitchCameraClick = { onEvent(CameraUiEvent.ToggleCamera) },
                         showHistogram = showHistogram,
                         onHistogramClick = { showHistogram = !showHistogram },
+                        showClippingWarning = uiState.showClippingWarning,
+                        onClippingWarningClick = { onEvent(CameraUiEvent.ToggleClippingWarning) },
                         modifier = Modifier.align(Alignment.Center)
                     )
                 }
@@ -337,10 +355,45 @@ fun CameraWScreen(
                 }
 
                 if (uiState.showSettingsSheet) {
+                    val sheetConfig = remember(
+                        uiState.photoBitDepth,
+                        uiState.burstFrames,
+                        uiState.pngCompression,
+                        uiState.noiseReductionMode,
+                        uiState.videoFormat,
+                        uiState.videoCodec,
+                        uiState.quality,
+                        uiState.dynamicMetadataMode,
+                        uiState.audioCodec,
+                        uiState.saveGyroData,
+                        uiState.cameraMode,
+                        uiState.logProfile,
+                        uiState.selectedLut,
+                        uiState.availableLuts
+                    ) {
+                        SheetConfigState(
+                            photoBitDepth = uiState.photoBitDepth,
+                            burstFrames = uiState.burstFrames,
+                            pngCompression = uiState.pngCompression,
+                            noiseReductionMode = uiState.noiseReductionMode,
+                            videoFormat = uiState.videoFormat,
+                            videoCodec = uiState.videoCodec,
+                            quality = uiState.quality,
+                            dynamicMetadataMode = uiState.dynamicMetadataMode,
+                            audioCodec = uiState.audioCodec,
+                            saveGyroData = uiState.saveGyroData,
+                            cameraMode = uiState.cameraMode,
+                            logProfile = uiState.logProfile,
+                            selectedLut = uiState.selectedLut,
+                            availableLuts = uiState.availableLuts
+                        )
+                    }
+
                     SettingsSheet(
                         onDismiss = { onEvent(CameraUiEvent.ToggleSettings) },
-                        state = uiState,
-                        onEvent = onEvent
+                        config = sheetConfig,
+                        onEvent = onEvent,
+                        onImportLut = { lutPickerLauncher.launch(arrayOf("*/*")) }
                     )
                 }
             }

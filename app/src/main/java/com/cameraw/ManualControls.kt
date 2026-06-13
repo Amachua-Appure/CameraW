@@ -7,7 +7,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,7 +24,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import com.cameraw.InfiniteRulerDial
 
 enum class ManualControlType { ISO, SHUTTER, FOCUS, WB }
 
@@ -129,7 +127,6 @@ fun ManualControlsOverlay(
                     else "${state.activeWb}K"
 
                 ControlItem(
-                    label = "ISO",
                     value = isoText,
                     icon = Icons.Outlined.Iso,
                     isActive = state.manualIso != null,
@@ -137,7 +134,6 @@ fun ManualControlsOverlay(
                 ) { onControlSelected(ManualControlType.ISO) }
 
                 ControlItem(
-                    label = "Shutter",
                     value = shutterText,
                     icon = Icons.Outlined.ShutterSpeed,
                     isActive = state.manualShutterNano != null,
@@ -145,7 +141,6 @@ fun ManualControlsOverlay(
                 ) { onControlSelected(ManualControlType.SHUTTER) }
 
                 ControlItem(
-                    label = "WB",
                     value = wbText,
                     icon = Icons.Outlined.WbSunny,
                     isActive = state.manualWbTemp != null,
@@ -153,7 +148,6 @@ fun ManualControlsOverlay(
                 ) { onControlSelected(ManualControlType.WB) }
 
                 ControlItem(
-                    label = "Focus",
                     value = focusText,
                     icon = Icons.Outlined.CenterFocusWeak,
                     isActive = state.manualFocusDist != null,
@@ -180,7 +174,6 @@ fun ManualControlsOverlay(
 
 @Composable
 fun ControlItem(
-    label: String,
     value: String,
     icon: ImageVector,
     isActive: Boolean,

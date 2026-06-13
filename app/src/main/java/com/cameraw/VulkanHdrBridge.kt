@@ -6,14 +6,16 @@ import androidx.annotation.Keep
 
 class VulkanHdrBridge {
     interface HdrMetadataListener {
-        fun onDynamicMetadataReady(metadata: ByteArray, dvMin: Int, dvMax: Int, dvAvg: Int, timestampNs: Long)
+        fun onDynamicMetadataReady(metadata: ByteArray, timestampNs: Long)
     }
 
     var metadataListener: HdrMetadataListener? = null
-
     @Keep
-    private fun onDynamicMetadata(metadata: ByteArray, dvMin: Int, dvMax: Int, dvAvg: Int, timestampNs: Long) {
-        metadataListener?.onDynamicMetadataReady(metadata, dvMin, dvMax, dvAvg, timestampNs)
+    private fun onDynamicMetadata(metadata: ByteArray, timestampNs: Long) {
+        metadataListener?.onDynamicMetadataReady(metadata, timestampNs)
+    }
+    @Keep
+    private fun onFrameReleased(timestampNs: Long) {
     }
 
     external fun nativeCreate(
@@ -22,12 +24,13 @@ class VulkanHdrBridge {
         sensorW: Int, sensorH: Int,
         black: Int, white: Int,
         hdrMode: Int,
+        logProfile: Int,
         cfa: Int
     ): Long
 
     external fun nativeBindEncoderSurface(handle: Long, surface: Surface): Boolean
-    external fun nativeSetColorMatrix(handle: Long, matrix: FloatArray)
-    external fun nativeGetLastMetadata(handle: Long): IntArray?
+
+    external fun nativeSetLut(handle: Long, lutData: FloatArray?, lutSize: Int, enabled: Boolean)
 
     external fun nativeProcessFrameBuffer(
         handle: Long,
@@ -47,7 +50,7 @@ class VulkanHdrBridge {
 
     companion object {
         @JvmStatic
-        external fun nativeRemuxVideo(inputPath: String, outputPath: String, sarNum: Int, sarDen: Int, hdrMode: Int): Boolean
+        external fun nativeRemuxVideo(inputPath: String, outputPath: String, sarNum: Int, sarDen: Int, hdrMode: Int, logProfile: Int): Boolean
 
         init { System.loadLibrary("cameraw_isp") }
     }

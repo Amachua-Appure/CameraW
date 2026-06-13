@@ -8,10 +8,6 @@ import android.hardware.camera2.params.ColorSpaceTransform
 import android.hardware.camera2.params.LensShadingMap
 import android.media.ExifInterface
 import android.media.Image
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaFormat
-import android.media.MediaMuxer
 import android.os.Build
 import android.util.Log
 import android.util.Rational
@@ -34,17 +30,16 @@ enum class CameraMode(val label: String) {
     RAW_VIDEO("Raw Video");
     override fun toString(): String = label
 }
-data class FrameEntry(val raw: ShortArray, val dx: Float, val dy: Float)
 
 object CameraWISP {
     init { System.loadLibrary("cameraw_isp") }
     external fun processBurstNative(
         frames: Array<ShortArray>,
         outRgb: ByteArray?,
-        width: Int, height: Int, blackLevel: Int, rGain: Float, bGain: Float,
-        maxVal: Float, matrix: FloatArray, bitDepth: Int,
+        width: Int, height: Int, baseBlackLevel: Int, rGain: Float, bGain: Float,
+        maxVal: Float, matrix: FloatArray, bitDepth: Int, cfaPattern: Int,
         lscMapArray: FloatArray, lscMapW: Int, lscMapH: Int,
-        noiseScale: Float, noiseOffset: Float
+        blackLevelsArray: FloatArray, noiseProfilesArray: FloatArray
     ): ByteArray?
 
     external fun initYuvAccumulator(width: Int, height: Int)
@@ -256,12 +251,12 @@ object ImageUtils {
     @SuppressLint("RestrictedApi")
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun processBurst(
-        images: List<Image>, file: File, whiteLevel: Int, blackLevel: Int, shadingMap: LensShadingMap?,
+        images: List<Image>, file: File, whiteLevel: Int, baseBlackLevel: Int, shadingMap: LensShadingMap?,
         sensorOrientation: Int, deviceOrientation: Int, iso: Int, shutter: Long, wbTemp: Int,
         compressionLevel: Int, bitDepth: Int, rGain: Float, bGain: Float,
-        isFrontCamera: Boolean, noiseScale: Float, noiseOffset: Float,
-        characteristics: CameraCharacteristics,
-        captureResult: TotalCaptureResult
+        isFrontCamera: Boolean, characteristics: CameraCharacteristics,
+        captureResult: TotalCaptureResult,
+        blackLevels: FloatArray, noiseProfiles: FloatArray
     ) {
         if (images.isEmpty()) return
         val startTime = System.currentTimeMillis()
@@ -271,7 +266,7 @@ object ImageUtils {
         Log.d("CameraWISP", "Unpacking RAW data...")
         val rawArrays = Array(count) { unpackRaw(images[it]) }
 
-        val safeMaxRaw = (whiteLevel - blackLevel).toFloat()
+        val safeMaxRaw = (whiteLevel - baseBlackLevel).toFloat()
         val fm1 = characteristics.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX1)
         val fm2 = characteristics.get(CameraCharacteristics.SENSOR_FORWARD_MATRIX2)
         val ill1 = characteristics.get(CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1)?.toInt() ?: 21
@@ -288,15 +283,15 @@ object ImageUtils {
         val lscH = shadingMap?.rowCount ?: 0
         val lscArray = FloatArray(shadingMap?.gainFactorCount ?: 0)
         shadingMap?.copyGainFactors(lscArray, 0)
-
+        val cfaPattern = characteristics.get(CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT) ?: 0
         Log.d("CameraWISP", "Firing GPU Pipeline ($bitDepth-bit)...")
 
         when (bitDepth) {
             14 -> {
                 val rawBytes = CameraWISP.processBurstNative(
-                    rawArrays, null, width, height, blackLevel, rGain, bGain,
-                    safeMaxRaw, finalMatrix, bitDepth, lscArray, lscW, lscH,
-                    noiseScale, noiseOffset
+                    rawArrays, null, width, height, baseBlackLevel, rGain, bGain,
+                    safeMaxRaw, finalMatrix, bitDepth, cfaPattern, lscArray, lscW, lscH,
+                    blackLevels, noiseProfiles
                 )
 
                 if (rawBytes != null) {
@@ -336,9 +331,9 @@ object ImageUtils {
                 val outRgb = ByteArray(height * rowStride)
 
                 CameraWISP.processBurstNative(
-                    rawArrays, outRgb, width, height, blackLevel, rGain, bGain,
-                    safeMaxRaw, finalMatrix, bitDepth, lscArray, lscW, lscH,
-                    noiseScale, noiseOffset
+                    rawArrays, outRgb, width, height, baseBlackLevel, rGain, bGain,
+                    safeMaxRaw, finalMatrix, bitDepth, cfaPattern, lscArray, lscW, lscH,
+                    blackLevels, noiseProfiles
                 )
 
                 FileOutputStream(file).use { fos ->
@@ -388,9 +383,9 @@ object ImageUtils {
             }
             else -> {
                 val avifBytes = CameraWISP.processBurstNative(
-                    rawArrays, null, width, height, blackLevel, rGain, bGain,
-                    safeMaxRaw, finalMatrix, bitDepth, lscArray, lscW, lscH,
-                    noiseScale, noiseOffset
+                    rawArrays, null, width, height, baseBlackLevel, rGain, bGain,
+                    safeMaxRaw, finalMatrix, bitDepth, cfaPattern, lscArray, lscW, lscH,
+                    blackLevels, noiseProfiles
                 )
 
                 if (avifBytes != null) {

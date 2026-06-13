@@ -51,6 +51,7 @@ void init_MLVWriter(MLVWriter_t * Writer, int Width, int Height, int BitDepth, i
     Writer->RAWI.block.raw_info.black_level = BlackLevel;
     Writer->RAWI.block.raw_info.white_level = WhiteLevel;
 
+    // Map Android CFA to MLV CFA format (Fixes Green/Black image)
     switch(CFA) {
         case 0: Writer->RAWI.block.raw_info.cfa_pattern = 0x02010100; break; // RGGB
         case 1: Writer->RAWI.block.raw_info.cfa_pattern = 0x01020001; break; // GRBG
@@ -98,6 +99,7 @@ size_t MLVWriterGetHeaderSize(MLVWriter_t * Writer)
     if (Writer->IDNT.write) size += Writer->IDNT.block.blockSize;
     if (Writer->EXPO.write) size += Writer->EXPO.block.blockSize;
     if (Writer->WBAL.write) size += Writer->WBAL.block.blockSize;
+    if (Writer->C2LS.write) size += Writer->C2LS.block.blockSize; // ADDED
     return size;
 }
 
@@ -113,6 +115,7 @@ void MLVWriterGetHeaderData(MLVWriter_t * Writer, void * HeaderData, int NumFram
     COPY_BLK(IDNT)
     COPY_BLK(EXPO)
     COPY_BLK(WBAL)
+    COPY_BLK(C2LS) // ADDED
 }
 
 size_t MLVWriterGetFrameHeaderSize(MLVWriter_t * Writer) { return sizeof(mlv_vidf_hdr_t); }

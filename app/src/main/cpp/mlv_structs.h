@@ -27,7 +27,9 @@
 #ifndef _MLV_STRUCTURE_H_
 #define _MLV_STRUCTURE_H_
 
+/* make sure the structures are packed e.g. using #pragma pack */
 
+/* Copied from mlv.h (GPL) - TODO: check if this is ok */
 #define MLV_VERSION_STRING "v2.0"
 #define MLV_VIDEO_CLASS_RAW          0x01
 #define MLV_VIDEO_CLASS_YUV          0x02
@@ -43,33 +45,35 @@
 #define MLV_FRAME_UNSPECIFIED 0
 #define MLV_FRAME_VIDF        1
 #define MLV_FRAME_AUDF        2
-
+/* End of GPL copied code */
 
 #pragma pack(push,1)
 
-
+// TODO: Review the struct, copied over from raw.h of ML source code
 struct raw_info
 {
-    uint32_t api_version;
-#if INTPTR_MAX == INT32_MAX
+    uint32_t api_version;   // increase this when changing the structure
+#if INTPTR_MAX == INT32_MAX // only works on 32-bit systems
     void* buffer;           // points to image data
 #else
-    uint32_t do_not_use_this;
+    uint32_t do_not_use_this; // this can't work on 64-bit systems
 #endif
 
     uint32_t height, width, pitch;
     uint32_t frame_size;
-    uint32_t bits_per_pixel;
+    uint32_t bits_per_pixel; // 14
 
-    uint32_t black_level;
-    uint32_t white_level;
+    uint32_t black_level; // autodetected
+    uint32_t white_level; // somewhere around 13000 - 16000, varies with camera, settings etc
+    // would be best to autodetect it, but we can't do this reliably yet
 
-    union
+    // TODO: Check if origin and size can be replaced with jpeg ones
+    union // DNG JPEG info
     {
         struct
         {
-            uint32_t x, y;
-            uint32_t width, height;
+            uint32_t x, y;          // DNG JPEG top left corner
+            uint32_t width, height; // DNG JPEG size
         } jpeg;
         struct
         {
@@ -77,7 +81,7 @@ struct raw_info
             uint32_t size[2];
         } crop;
     };
-    union
+    union // DNG active sensor area (Y1, X1, Y2, X2)
     {
         struct
         {
@@ -85,11 +89,11 @@ struct raw_info
         } active_area;
         uint32_t dng_active_area[4];
     };
-    uint32_t exposure_bias[2];
-    uint32_t cfa_pattern;
+    uint32_t exposure_bias[2]; // DNG Exposure Bias (idk what's that)
+    uint32_t cfa_pattern;      // stick to 0x02010100 (RGBG) if you can
     uint32_t calibration_illuminant1;
-    int32_t color_matrix1[18];
-    uint32_t dynamic_range;
+    int32_t color_matrix1[18]; // DNG Color Matrix
+    uint32_t dynamic_range;    // EV x100, from analyzing black level and noise (very close to DxO)
 };
 
 typedef struct {
@@ -338,15 +342,32 @@ typedef struct {
     uint8_t     blockType[4];    /* "C2MD" - Camera2 Metadata per frame */
     uint32_t    blockSize;       /* size of this header + data */
     uint64_t    timestamp;       /* same as VIDF timestamp */
-    double      noiseProfile[6]; /* 3 channels x (scale, offset) */
+    double      noiseProfile[8]; /* 3 channels x (scale, offset) */
+
+    /* --- NEW DYNAMIC TAGS --- */
+    uint64_t    frameDuration;
+    uint64_t    rollingShutterSkew;
+    float       dynamicBlackLevel[4];
+    uint32_t    dynamicWhiteLevel;
+    float       neutralColorPoint[3];
+    float       focusDistance;
+    float       focusRange[2];
+    uint8_t     lensState;
+    uint8_t     pad[3];          /* 4-byte alignment padding */
+    uint32_t    mtkGyroValid;    /* Custom MediaTek gyro validity flag */
+    /* ------------------------ */
+
     uint32_t    lscWidth;
     uint32_t    lscHeight;
+    /* followed by lscWidth * lscHeight * 4 floats */
+    /* followed by mtkGyroData (if mtkGyroValid > 0, up to 288 bytes) */
 } mlv_c2md_hdr_t;
 
 typedef struct {
     uint8_t     blockType[4];    /* "C2ST" - Camera2 Static */
     uint32_t    blockSize;
     uint64_t    timestamp;       /* currently unused, set to 0 */
+    float       colorTransform1[9]; /* NEW: DNG Color Matrix 1 */
     float       colorMatrix2[9];
     float       forwardMatrix1[9];
     float       forwardMatrix2[9];
@@ -359,6 +380,19 @@ typedef struct {
     char        software[64];
 } mlv_c2st_hdr_t;
 
+/* NEW: Static Advanced Lens Block */
+typedef struct {
+    uint8_t     blockType[4];    /* "C2LS" - Camera2 Lens Static */
+    uint32_t    blockSize;
+    uint64_t    timestamp;
+    uint8_t     poseReference;
+    uint8_t     pad[3];          /* alignment */
+    float       poseRotation[4];
+    float       poseTranslation[3];
+    float       intrinsicCalibration[5];
+    float       distortion[5];
+    float       filterDensity;
+} mlv_c2ls_hdr_t;
 
 typedef struct {
     uint8_t     blockType[4];    /* "CROP" */

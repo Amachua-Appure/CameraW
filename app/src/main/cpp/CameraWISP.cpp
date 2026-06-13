@@ -12,6 +12,10 @@
 #include <GLES3/gl31.h>
 #include <arm_neon.h>
 
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -37,7 +41,8 @@ EGLSetup initHeadlessEGL(int width, int height) {
     EGLSetup setup; setup.display = eglGetDisplay(EGL_DEFAULT_DISPLAY); eglInitialize(setup.display, nullptr, nullptr);
     const EGLint configAttribs[] = { EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE };
     EGLint numConfigs; EGLConfig config; eglChooseConfig(setup.display, configAttribs, &config, 1, &numConfigs);
-    const EGLint pbufferAttribs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
+
+    const EGLint pbufferAttribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
     setup.surface = eglCreatePbufferSurface(setup.display, config, pbufferAttribs);
     const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, 0x30FB, 1, EGL_NONE };
     setup.context = eglCreateContext(setup.display, config, EGL_NO_CONTEXT, contextAttribs);
@@ -51,114 +56,8 @@ void destroyEGL(EGLSetup& setup) {
 GLuint compileShader(GLenum type, const char* source) {
     GLuint shader = glCreateShader(type); glShaderSource(shader, 1, &source, nullptr); glCompileShader(shader);
     GLint success; glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (!success) { char infoLog[512]; glGetShaderInfoLog(shader, 512, nullptr, infoLog); LOGE("Shader Failed:\n%s", infoLog); }
+    if (!success) { char infoLog[512]; glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &success); glGetShaderInfoLog(shader, 512, nullptr, infoLog); LOGE("Shader Failed:\n%s", infoLog); }
     return shader;
-}
-
-void calculateMotionGridCPU(const std::vector<float>& refLuma, const std::vector<float>& tgtLuma,
-                            int lw, int lh, std::vector<float>& outGrid, int f_idx, int gridW, int gridH) {
-    int L_TILE = 16;
-    int searchRange = 16;
-    int layerOffset = f_idx * gridW * gridH * 2;
-
-    for (int ty = 0; ty < gridH; ty++) {
-        for (int tx = 0; tx < gridW; tx++) {
-            int startX = tx * L_TILE; int startY = ty * L_TILE;
-            int endX = std::min(startX + L_TILE, lw); int endY = std::min(startY + L_TILE, lh);
-
-            int bestDx = 0, bestDy = 0;
-            float minSAD = 1e9f;
-
-            for (int dy = -searchRange; dy <= searchRange; dy += 4) {
-                for (int dx = -searchRange; dx <= searchRange; dx += 4) {
-                    float sad = 0;
-                    for (int y = startY; y < endY; y += 2) {
-                        int sy = std::clamp(y + dy, 0, lh - 1);
-                        for (int x = startX; x < endX; x += 2) {
-                            int sx = std::clamp(x + dx, 0, lw - 1);
-                            sad += std::abs(refLuma[y*lw+x] - tgtLuma[sy*lw+sx]);
-                        }
-                    }
-                    if (sad < minSAD) { minSAD = sad; bestDx = dx; bestDy = dy; }
-                }
-            }
-
-            int cX = bestDx, cY = bestDy; minSAD = 1e9f;
-            for (int dy = cY - 4; dy <= cY + 4; dy += 1) {
-                for (int dx = cX - 4; dx <= cX + 4; dx += 1) {
-                    float sad = 0;
-                    for (int y = startY; y < endY; y++) {
-                        int sy = std::clamp(y + dy, 0, lh - 1);
-                        for (int x = startX; x < endX; x++) {
-                            int sx = std::clamp(x + dx, 0, lw - 1);
-                            sad += std::abs(refLuma[y*lw+x] - tgtLuma[sy*lw+sx]);
-                        }
-                    }
-                    if (sad < minSAD) { minSAD = sad; bestDx = dx; bestDy = dy; }
-                }
-            }
-
-            auto getSad = [&](int dx, int dy) {
-                float sad = 0;
-                for (int y = startY; y < endY; y++) {
-                    int sy = std::clamp(y + dy, 0, lh - 1);
-                    for (int x = startX; x < endX; x++) {
-                        int sx = std::clamp(x + dx, 0, lw - 1);
-                        sad += std::abs(refLuma[y*lw+x] - tgtLuma[sy*lw+sx]);
-                    }
-                }
-                return sad;
-            };
-
-            float sad00 = getSad(bestDx, bestDy);
-            float sadM10 = getSad(bestDx - 1, bestDy); float sadP10 = getSad(bestDx + 1, bestDy);
-            float sad0M1 = getSad(bestDx, bestDy - 1); float sad0P1 = getSad(bestDx, bestDy + 1);
-
-            float denomX = 2.0f * (sadM10 - 2.0f * sad00 + sadP10);
-            float subDx = (denomX > 0.001f) ? (sadM10 - sadP10) / denomX : 0.0f;
-            float denomY = 2.0f * (sad0M1 - 2.0f * sad00 + sad0P1);
-            float subDy = (denomY > 0.001f) ? (sad0M1 - sad0P1) / denomY : 0.0f;
-
-            float finalDx = (bestDx + std::clamp(subDx, -1.0f, 1.0f)) * 2.0f;
-            float finalDy = (bestDy + std::clamp(subDy, -1.0f, 1.0f)) * 2.0f;
-
-            int tileOffset = layerOffset + (ty * gridW + tx) * 2;
-            outGrid[tileOffset] = finalDx;
-            outGrid[tileOffset + 1] = finalDy;
-        }
-    }
-
-    std::vector<float> tempGrid(gridW * gridH * 2);
-    for(int i = 0; i < gridW * gridH * 2; i++) {
-        tempGrid[i] = outGrid[layerOffset + i];
-    }
-
-    auto getMedian = [](std::vector<float>& vals) {
-        std::nth_element(vals.begin(), vals.begin() + vals.size() / 2, vals.end());
-        return vals[vals.size() / 2];
-    };
-
-    for (int ty = 0; ty < gridH; ty++) {
-        for (int tx = 0; tx < gridW; tx++) {
-            std::vector<float> dxs, dys;
-            dxs.reserve(9);
-            dys.reserve(9);
-
-            for(int dy = -1; dy <= 1; dy++) {
-                for(int dx = -1; dx <= 1; dx++) {
-                    int ny = std::clamp(ty + dy, 0, gridH - 1);
-                    int nx = std::clamp(tx + dx, 0, gridW - 1);
-                    int idx = (ny * gridW + nx) * 2;
-                    dxs.push_back(tempGrid[idx]);
-                    dys.push_back(tempGrid[idx + 1]);
-                }
-            }
-
-            int outIdx = layerOffset + (ty * gridW + tx) * 2;
-            outGrid[outIdx]     = getMedian(dxs);
-            outGrid[outIdx + 1] = getMedian(dys);
-        }
-    }
 }
 
 const char* computeShaderSource = R"glsl(#version 310 es
@@ -174,6 +73,9 @@ const char* computeShaderSource = R"glsl(#version 310 es
     uniform int validFrameCount;
     uniform float noiseScale;
     uniform float noiseOffset;
+    uniform float rGain;
+    uniform float bGain;
+    uniform int cfaPattern;
 
     float getG(sampler2DArray tex, ivec2 pos, int layer, ivec2 imgSize) {
         float t = texelFetch(tex, ivec3(pos.x, clamp(pos.y - 1, 0, imgSize.y - 1), layer), 0).r;
@@ -200,15 +102,23 @@ const char* computeShaderSource = R"glsl(#version 310 es
         float expectedNoise = max(0.0000001, (noiseScale * max(0.0, refC)) + noiseOffset);
         float tuningDenom = max(expectedNoise, var * 2.0) * 4.0;
 
-        bool isChroma = ((texelPos.x % 2) == (texelPos.y % 2));
+        int bayer = ((texelPos.y % 2) << 1) | (texelPos.x % 2);
+        int mappedBayer = bayer ^ cfaPattern;
+        bool isChroma = (mappedBayer == 0 || mappedBayer == 3);
         float refG = isChroma ? getG(rawBurst, texelPos, 0, imgSize) : refC;
-        float refChroma = isChroma ? (refC - refG) : 0.0;
+
+        float wbGain = 1.0;
+        if (isChroma) {
+            wbGain = (mappedBayer == 0) ? rGain : bGain;
+        }
+
+        float refChromaPerceptual = isChroma ? ((refC * wbGain) - refG) : 0.0;
+        float refChromaRaw = isChroma ? (refC - refG) : 0.0;
 
         float lumaWeightSum = 1.0;
         float lumaPixelSum = refG;
-
         float chromaWeightSum = 1.0;
-        float chromaPixelSum = refChroma;
+        float chromaPixelSum = refChromaRaw;
 
         vec2 uv = vec2(texelPos) / vec2(imgSize);
 
@@ -230,7 +140,8 @@ const char* computeShaderSource = R"glsl(#version 310 es
             float tgtC = mix(mix(c00, c10, fractPos.x), mix(c01, c11, fractPos.x), fractPos.y);
 
             float tgtG = tgtC;
-            float tgtChroma = 0.0;
+            float tgtChromaPerceptual = 0.0;
+            float tgtChromaRaw = 0.0;
 
             if (isChroma) {
                 float g00 = getG(rawBurst, basePos, i, imgSize);
@@ -238,11 +149,14 @@ const char* computeShaderSource = R"glsl(#version 310 es
                 float g01 = getG(rawBurst, basePos + ivec2(0, 2), i, imgSize);
                 float g11 = getG(rawBurst, basePos + ivec2(2, 2), i, imgSize);
                 tgtG = mix(mix(g00, g10, fractPos.x), mix(g01, g11, fractPos.x), fractPos.y);
-                tgtChroma = tgtC - tgtG;
+
+                tgtChromaPerceptual = (tgtC * wbGain) - tgtG;
+                tgtChromaRaw = tgtC - tgtG;
             }
 
             float diff = tgtG - refG;
             float diffSq = diff * diff;
+
             float wLuma = tuningDenom / (tuningDenom + diffSq);
             wLuma = wLuma * wLuma;
 
@@ -250,13 +164,14 @@ const char* computeShaderSource = R"glsl(#version 310 es
             lumaWeightSum += wLuma;
 
             if (isChroma) {
+                float chromaDiff = tgtChromaPerceptual - refChromaPerceptual;
                 float chromaDenom = tuningDenom * 8.0;
-                float chromaDiff = tgtChroma - refChroma;
+
                 float wChroma = chromaDenom / (chromaDenom + (chromaDiff * chromaDiff));
 
                 wChroma = min(wChroma, wLuma * 2.0);
 
-                chromaPixelSum += tgtChroma * wChroma;
+                chromaPixelSum += tgtChromaRaw * wChroma;
                 chromaWeightSum += wChroma;
             }
         }
@@ -269,157 +184,485 @@ const char* computeShaderSource = R"glsl(#version 310 es
     }
 )glsl";
 
-const char* vertexShaderSource = R"glsl(#version 310 es
-    const vec2 vertices[4] = vec2[4](vec2(-1.0, -1.0), vec2( 1.0, -1.0), vec2(-1.0,  1.0), vec2( 1.0,  1.0));
-    out vec2 vTexCoord;
-    void main() { gl_Position = vec4(vertices[gl_VertexID], 0.0, 1.0); vTexCoord = vertices[gl_VertexID] * 0.5 + 0.5; }
-)glsl";
+const char* hlReconstructSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
 
-const char* fragmentShaderSource = R"glsl(#version 310 es
-    precision highp float;
-    precision highp int;
+    layout(r32f, binding = 0) uniform readonly highp image2D inRaw;
+    layout(r32f, binding = 1) uniform writeonly highp image2D outRaw;
 
-    uniform sampler2D rawTexture;
-    uniform vec2 texelSize;
-    uniform mat3 colorMatrix;
+    uniform int cfaPattern;
+    uniform float clipLevel;
     uniform float rGain;
     uniform float bGain;
-    uniform float normFactor;
-    uniform int isPq;
 
-    const float exposure = 2.5;
-    in vec2 vTexCoord;
-    out vec4 fragColor;
-
-    float fetch2(vec2 baseUv, float dx, float dy) {
-        vec2 target = baseUv + vec2(dx, dy) * texelSize;
-        if (target.x < 0.0 || target.x > 1.0) dx = -dx;
-        if (target.y < 0.0 || target.y > 1.0) dy = -dy;
-        vec2 safeUv = clamp(baseUv + vec2(dx, dy) * texelSize, 0.0, 1.0);
-        return texture(rawTexture, safeUv).r;
+    float getRaw(ivec2 p, ivec2 size) {
+        return imageLoad(inRaw, clamp(p, ivec2(0), size - 1)).r;
     }
-
-    vec3 getRGB(vec2 uv, ivec2 pCoord) {
-        int x = pCoord.x & 1;
-        int y = pCoord.y & 1;
-
-        float C = fetch2(uv, 0., 0.);
-        float L = fetch2(uv, -1., 0.); float R_ = fetch2(uv, 1., 0.);
-        float T = fetch2(uv, 0., -1.); float B_ = fetch2(uv, 0., 1.);
-        float TL = fetch2(uv, -1., -1.); float TR = fetch2(uv, 1., -1.);
-        float BL = fetch2(uv, -1., 1.); float BR = fetch2(uv, 1., 1.);
-
-        float R, G, B;
-
-        if (x == 0 && y == 0) {
-            R = C;
-            float gH = abs(L - R_) + abs(TL - TR) + abs(BL - BR) + 0.5 * abs(C - fetch2(uv, -2., 0.)) + 0.5 * abs(C - fetch2(uv, 2., 0.));
-            float gV = abs(T - B_) + abs(TL - BL) + abs(TR - BR) + 0.5 * abs(C - fetch2(uv, 0., -2.)) + 0.5 * abs(C - fetch2(uv, 0., 2.));
-            float wH = 1.0 / (pow(gH, 4.0) + 1e-7); float wV = 1.0 / (pow(gV, 4.0) + 1e-7);
-            float sumW = wH + wV; wH /= sumW; wV /= sumW;
-            float GH = 0.5 * (L + R_) + 0.25 * (2.0 * C - fetch2(uv, -2., 0.) - fetch2(uv, 2., 0.));
-            float GV = 0.5 * (T + B_) + 0.25 * (2.0 * C - fetch2(uv, 0., -2.) - fetch2(uv, 0., 2.));
-            G = wH * GH + wV * GV;
-            G = clamp(G, min(min(T, B_), min(L, R_)), max(max(T, B_), max(L, R_)));
-            B = G + 0.25 * (TL + TR + BL + BR) - 0.25 * (T + B_ + L + R_);
-            B = clamp(B, min(min(TL, TR), min(BL, BR)), max(max(TL, TR), max(BL, BR)));
-        } else if (x == 1 && y == 1) {
-            B = C;
-            float gH = abs(L - R_) + abs(TL - TR) + abs(BL - BR) + 0.5 * abs(C - fetch2(uv, -2., 0.)) + 0.5 * abs(C - fetch2(uv, 2., 0.));
-            float gV = abs(T - B_) + abs(TL - BL) + abs(TR - BR) + 0.5 * abs(C - fetch2(uv, 0., -2.)) + 0.5 * abs(C - fetch2(uv, 0., 2.));
-            float wH = 1.0 / (pow(gH, 4.0) + 1e-7); float wV = 1.0 / (pow(gV, 4.0) + 1e-7);
-            float sumW = wH + wV; wH /= sumW; wV /= sumW;
-            float GH = 0.5 * (L + R_) + 0.25 * (2.0 * C - fetch2(uv, -2., 0.) - fetch2(uv, 2., 0.));
-            float GV = 0.5 * (T + B_) + 0.25 * (2.0 * C - fetch2(uv, 0., -2.) - fetch2(uv, 0., 2.));
-            G = wH * GH + wV * GV;
-            G = clamp(G, min(min(T, B_), min(L, R_)), max(max(T, B_), max(L, R_)));
-            R = G + 0.25 * (TL + TR + BL + BR) - 0.25 * (T + B_ + L + R_);
-            R = clamp(R, min(min(TL, TR), min(BL, BR)), max(max(TL, TR), max(BL, BR)));
-        } else if (x == 1 && y == 0) {
-            G = C;
-            R = 0.5 * (L + R_) + 0.25 * (2.0 * C - fetch2(uv, -2., 0.) - fetch2(uv, 2., 0.)); R = clamp(R, min(L, R_), max(L, R_));
-            B = 0.5 * (T + B_) + 0.25 * (2.0 * C - fetch2(uv, 0., -2.) - fetch2(uv, 0., 2.)); B = clamp(B, min(T, B_), max(T, B_));
-        } else {
-            G = C;
-            R = 0.5 * (T + B_) + 0.25 * (2.0 * C - fetch2(uv, 0., -2.) - fetch2(uv, 0., 2.)); R = clamp(R, min(T, B_), max(T, B_));
-            B = 0.5 * (L + R_) + 0.25 * (2.0 * C - fetch2(uv, -2., 0.) - fetch2(uv, 2., 0.)); B = clamp(B, min(L, R_), max(L, R_));
-        }
-        return vec3(R, G, B);
-    }
-
-    float linearToPq(float c) { float m1 = 2610.0 / 16384.0; float m2 = (2523.0 / 4096.0) * 128.0; float c1 = 3424.0 / 4096.0; float c2 = (2413.0 / 4096.0) * 32.0; float c3 = (2392.0 / 4096.0) * 32.0; float l = pow(max(c * 0.1, 1e-7), m1); return pow((c1 + c2 * l) / (1.0 + c3 * l), m2); }
-    float linearToHlg(float c) { if (c <= 1.0 / 12.0) return sqrt(3.0 * max(c, 0.0)); return 0.17883277 * log(max(12.0 * c - 0.28466892, 1e-7)) + 0.55991073; }
-
-    #define MIN(a,b) ((a)<(b)?(a):(b))
-    #define MAX(a,b) ((a)>(b)?(a):(b))
-    #define SWAP(a,b) { float temp = a; a = MIN(temp,b); b = MAX(temp,b); }
 
     void main() {
-        ivec2 pos = ivec2(gl_FragCoord.xy);
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = imageSize(inRaw);
+        if (pos.x >= size.x || pos.y >= size.y) return;
 
-        vec3 rgbC = getRGB(vTexCoord, pos);
+        float val = getRaw(pos, size);
 
-        vec3 rgbN = getRGB(vTexCoord + vec2(0.0, -texelSize.y * 2.0), pos + ivec2(0, -2));
-        vec3 rgbS = getRGB(vTexCoord + vec2(0.0,  texelSize.y * 2.0), pos + ivec2(0,  2));
-        vec3 rgbW = getRGB(vTexCoord + vec2(-texelSize.x * 2.0, 0.0), pos + ivec2(-2, 0));
-        vec3 rgbE = getRGB(vTexCoord + vec2( texelSize.x * 2.0, 0.0), pos + ivec2( 2, 0));
+        int bayer = ((pos.y & 1) << 1) | (pos.x & 1);
+        int mappedBayer = bayer ^ cfaPattern;
+        bool isGreen = (mappedBayer == 1 || mappedBayer == 2);
 
-        float crC = rgbC.r - rgbC.g; float cbC = rgbC.b - rgbC.g;
-        float crN = rgbN.r - rgbN.g; float cbN = rgbN.b - rgbN.g;
-        float crS = rgbS.r - rgbS.g; float cbS = rgbS.b - rgbS.g;
-        float crW = rgbW.r - rgbW.g; float cbW = rgbW.b - rgbW.g;
-        float crE = rgbE.r - rgbE.g; float cbE = rgbE.b - rgbE.g;
+        float wbGain = 1.0;
+        if (mappedBayer == 0) wbGain = rGain;
+        else if (mappedBayer == 3) wbGain = bGain;
 
-        float r_arr[5];
-        r_arr[0] = crC; r_arr[1] = crN; r_arr[2] = crS; r_arr[3] = crE; r_arr[4] = crW;
-        SWAP(r_arr[0], r_arr[1]); SWAP(r_arr[3], r_arr[4]); SWAP(r_arr[0], r_arr[3]);
-        SWAP(r_arr[1], r_arr[4]); SWAP(r_arr[1], r_arr[2]); SWAP(r_arr[2], r_arr[3]);
-        SWAP(r_arr[1], r_arr[2]);
-        float medCr = r_arr[2];
+        float strictClip = clipLevel * 0.995;
+        float outVal = val;
 
-        float b_arr[5];
-        b_arr[0] = cbC; b_arr[1] = cbN; b_arr[2] = cbS; b_arr[3] = cbE; b_arr[4] = cbW;
-        SWAP(b_arr[0], b_arr[1]); SWAP(b_arr[3], b_arr[4]); SWAP(b_arr[0], b_arr[3]);
-        SWAP(b_arr[1], b_arr[4]); SWAP(b_arr[1], b_arr[2]); SWAP(b_arr[2], b_arr[3]);
-        SWAP(b_arr[1], b_arr[2]);
-        float medCb = b_arr[2];
+        if (val >= strictClip && !isGreen) {
+            float ratioSum = 0.0;
+            float weightSum = 0.0;
 
-        vec3 rgb = vec3(medCr + rgbC.g, rgbC.g, medCb + rgbC.g);
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    ivec2 sPos = pos + ivec2(dx * 2, dy * 2);
+                    float sVal = getRaw(sPos, size);
 
-        rgb.r *= rGain * normFactor * exposure;
-        rgb.g *= normFactor * exposure;
-        rgb.b *= bGain * normFactor * exposure;
+                    if (sVal < strictClip) {
+                        float avgG = (getRaw(sPos + ivec2(1, 0), size) +
+                                      getRaw(sPos + ivec2(-1, 0), size) +
+                                      getRaw(sPos + ivec2(0, 1), size) +
+                                      getRaw(sPos + ivec2(0, -1), size)) * 0.25;
+
+                        if (avgG < strictClip && avgG > 1e-5) {
+                            float distSq = float(dx*dx + dy*dy);
+                            float weight = 1.0 / (1.0 + distSq);
+                            ratioSum += (sVal / avgG) * weight;
+                            weightSum += weight;
+                        }
+                    }
+                }
+            }
+
+            float localG = (getRaw(pos + ivec2(1, 0), size) +
+                            getRaw(pos + ivec2(-1, 0), size) +
+                            getRaw(pos + ivec2(0, 1), size) +
+                            getRaw(pos + ivec2(0, -1), size)) * 0.25;
+
+            if (weightSum > 0.0 && localG < strictClip) {
+                outVal = localG * (ratioSum / weightSum);
+            }
+        }
+
+        imageStore(outRaw, pos, vec4(outVal * wbGain, 0.0, 0.0, 0.0));
+    }
+)glsl";
+
+const char* rcdVhlpfSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
+    uniform sampler2D uRawTex; uniform int yOffset;
+    layout(rgba16f, binding = 0) uniform writeonly highp image2D outVHLPF;
+    uniform float uWhiteBlackRange;
+
+    float raw(ivec2 pos, int dx, int dy, ivec2 size) {
+        return texelFetch(uRawTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r / max(1.0, uWhiteBlackRange);
+    }
+    float V_hpf(ivec2 pos, int dx, int dy, ivec2 size) {
+        float val = (raw(pos, dx, dy-3, size) - raw(pos, dx, dy-1, size) - raw(pos, dx, dy+1, size) + raw(pos, dx, dy+3, size)) - 3.0*(raw(pos, dx, dy-2, size) + raw(pos, dx, dy+2, size)) + 6.0*raw(pos, dx, dy, size);
+        return val * val;
+    }
+    float H_hpf(ivec2 pos, int dx, int dy, ivec2 size) {
+        float val = (raw(pos, dx-3, dy, size) - raw(pos, dx-1, dy, size) - raw(pos, dx+1, dy, size) + raw(pos, dx+3, dy, size)) - 3.0*(raw(pos, dx-2, dy, size) + raw(pos, dx+2, dy, size)) + 6.0*raw(pos, dx, dy, size);
+        return val * val;
+    }
+
+    void main() {
+        ivec2 pos = ivec2(int(gl_GlobalInvocationID.x), int(gl_GlobalInvocationID.y) + yOffset);
+        ivec2 size = textureSize(uRawTex, 0);
+        if(pos.x >= size.x || pos.y >= size.y) return;
+
+        float lpf = raw(pos, 0, 0, size) +
+                    0.5 * (raw(pos, 0, -1, size) + raw(pos, 0, 1, size) + raw(pos, -1, 0, size) + raw(pos, 1, 0, size)) +
+                    0.25 * (raw(pos, -1, -1, size) + raw(pos, 1, -1, size) + raw(pos, -1, 1, size) + raw(pos, 1, 1, size));
+
+        float V_Stat = max(1e-10, V_hpf(pos, 0, -1, size) + V_hpf(pos, 0, 0, size) + V_hpf(pos, 0, 1, size));
+        float H_Stat = max(1e-10, H_hpf(pos, -1, 0, size) + H_hpf(pos, 0, 0, size) + H_hpf(pos, 1, 0, size));
+
+        imageStore(outVHLPF, pos, vec4(V_Stat / (V_Stat + H_Stat), lpf, 0.0, 0.0));
+    }
+)glsl";
+
+const char* rcdGreenSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
+    uniform sampler2D uRawTex; uniform sampler2D uVHLPFTex; uniform int yOffset;
+    layout(r32f, binding = 0) uniform writeonly highp image2D outGreen;
+    uniform float uWhiteBlackRange;
+    uniform int cfaPattern;
+
+    float raw(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uRawTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r / max(1.0, uWhiteBlackRange); }
+    float lpf(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uVHLPFTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).g; }
+    float vh_dir(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uVHLPFTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r; }
+
+    void main() {
+        ivec2 pos = ivec2(int(gl_GlobalInvocationID.x), int(gl_GlobalInvocationID.y) + yOffset);
+        ivec2 size = textureSize(uRawTex, 0);
+        if(pos.x >= size.x || pos.y >= size.y) return;
+
+        int bayer = ((pos.y & 1) << 1) | (pos.x & 1);
+        int mappedBayer = bayer ^ cfaPattern;
+        bool isGreen = (mappedBayer == 1 || mappedBayer == 2);
+
+        if (isGreen) {
+            imageStore(outGreen, pos, vec4(raw(pos, 0, 0, size), 0.0, 0.0, 0.0));
+            return;
+        }
+
+        float cfai = raw(pos, 0, 0, size); float eps = 1e-5;
+        float N_Grad = eps + (abs(raw(pos, 0, -1, size) - raw(pos, 0, 1, size)) + abs(cfai - raw(pos, 0, -2, size))) + (abs(raw(pos, 0, -1, size) - raw(pos, 0, -3, size)) + abs(raw(pos, 0, -2, size) - raw(pos, 0, -4, size)));
+        float S_Grad = eps + (abs(raw(pos, 0, -1, size) - raw(pos, 0, 1, size)) + abs(cfai - raw(pos, 0, 2, size))) + (abs(raw(pos, 0, 1, size) - raw(pos, 0, 3, size)) + abs(raw(pos, 0, 2, size) - raw(pos, 0, 4, size)));
+        float W_Grad = eps + (abs(raw(pos, -1, 0, size) - raw(pos, 1, 0, size)) + abs(cfai - raw(pos, -2, 0, size))) + (abs(raw(pos, -1, 0, size) - raw(pos, -3, 0, size)) + abs(raw(pos, -2, 0, size) - raw(pos, -4, 0, size)));
+        float E_Grad = eps + (abs(raw(pos, -1, 0, size) - raw(pos, 1, 0, size)) + abs(cfai - raw(pos, 2, 0, size))) + (abs(raw(pos, 1, 0, size) - raw(pos, 3, 0, size)) + abs(raw(pos, 2, 0, size) - raw(pos, 4, 0, size)));
+
+        float lpfi = lpf(pos, 0, 0, size);
+        float N_Est = raw(pos, 0, -1, size) * (lpfi + lpfi) / (eps + lpfi + lpf(pos, 0, -1, size));
+        float S_Est = raw(pos, 0, 1, size) * (lpfi + lpfi) / (eps + lpfi + lpf(pos, 0, 1, size));
+        float W_Est = raw(pos, -1, 0, size) * (lpfi + lpfi) / (eps + lpfi + lpf(pos, -1, 0, size));
+        float E_Est = raw(pos, 1, 0, size) * (lpfi + lpfi) / (eps + lpfi + lpf(pos, 1, 0, size));
+
+        float V_Est = (S_Grad * N_Est + N_Grad * S_Est) / (N_Grad + S_Grad);
+        float H_Est = (W_Grad * E_Est + E_Grad * W_Est) / (E_Grad + W_Grad);
+
+        float VH_Central = vh_dir(pos, 0, 0, size);
+        float VH_Neighbour = 0.25 * (vh_dir(pos, -1, -1, size) + vh_dir(pos, 1, -1, size) + vh_dir(pos, -1, 1, size) + vh_dir(pos, 1, 1, size));
+        float VH_Disc = (abs(0.5 - VH_Central) < abs(0.5 - VH_Neighbour)) ? VH_Neighbour : VH_Central;
+
+        imageStore(outGreen, pos, vec4(mix(V_Est, H_Est, VH_Disc), 0.0, 0.0, 0.0));
+    }
+)glsl";
+
+const char* rcdPqSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
+    uniform sampler2D uRawTex; uniform int yOffset;
+    layout(r32f, binding = 0) uniform writeonly highp image2D outPQDir;
+    uniform float uWhiteBlackRange;
+
+    float raw(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uRawTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r / max(1.0, uWhiteBlackRange); }
+    float P_CDiff(ivec2 pos, int dx, int dy, ivec2 size) { return pow((raw(pos, dx-3, dy-3, size) - raw(pos, dx-1, dy-1, size) - raw(pos, dx+1, dy+1, size) + raw(pos, dx+3, dy+3, size)) - 3.0*(raw(pos, dx-2, dy-2, size) + raw(pos, dx+2, dy+2, size)) + 6.0*raw(pos, dx, dy, size), 2.0); }
+    float Q_CDiff(ivec2 pos, int dx, int dy, ivec2 size) { return pow((raw(pos, dx+3, dy-3, size) - raw(pos, dx+1, dy-1, size) - raw(pos, dx-1, dy+1, size) + raw(pos, dx-3, dy+3, size)) - 3.0*(raw(pos, dx+2, dy-2, size) + raw(pos, dx-2, dy+2, size)) + 6.0*raw(pos, dx, dy, size), 2.0); }
+
+    void main() {
+        ivec2 pos = ivec2(int(gl_GlobalInvocationID.x), int(gl_GlobalInvocationID.y) + yOffset);
+        ivec2 size = textureSize(uRawTex, 0);
+        if(pos.x >= size.x || pos.y >= size.y) return;
+
+        float p_stat = max(1e-10, P_CDiff(pos, -1, -1, size) + P_CDiff(pos, 0, 0, size) + P_CDiff(pos, 1, 1, size));
+        float q_stat = max(1e-10, Q_CDiff(pos, 1, -1, size) + Q_CDiff(pos, 0, 0, size) + Q_CDiff(pos, -1, 1, size));
+        imageStore(outPQDir, pos, vec4(p_stat / (p_stat + q_stat), 0.0, 0.0, 0.0));
+    }
+)glsl";
+
+const char* rcdChromaBrSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
+    uniform sampler2D uRawTex; uniform sampler2D uGreenTex; uniform sampler2D uPQTex; uniform int yOffset;
+    layout(rgba16f, binding = 0) uniform writeonly highp image2D outChroma;
+    uniform float uWhiteBlackRange;
+    uniform int cfaPattern;
+
+    float raw(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uRawTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r / max(1.0, uWhiteBlackRange); }
+    float green(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uGreenTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r; }
+    float pq_dir(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uPQTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r; }
+
+    void main() {
+        ivec2 pos = ivec2(int(gl_GlobalInvocationID.x), int(gl_GlobalInvocationID.y) + yOffset);
+        ivec2 size = textureSize(uRawTex, 0);
+        if(pos.x >= size.x || pos.y >= size.y) return;
+
+        int bayer = ((pos.y & 1) << 1) | (pos.x & 1);
+        int mappedBayer = bayer ^ cfaPattern;
+        bool isRed = (mappedBayer == 0);
+        bool isBlue = (mappedBayer == 3);
+        float g_center = green(pos, 0, 0, size);
+
+        if (!isRed && !isBlue) {
+            imageStore(outChroma, pos, vec4(0.0, g_center, 0.0, 1.0)); return;
+        }
+
+        float PQ_Central = pq_dir(pos, 0, 0, size);
+        float PQ_Neighbour = 0.25 * (pq_dir(pos, -1, -1, size) + pq_dir(pos, 1, -1, size) + pq_dir(pos, -1, 1, size) + pq_dir(pos, 1, 1, size));
+        float PQ_Disc = (abs(0.5 - PQ_Central) < abs(0.5 - PQ_Neighbour)) ? PQ_Neighbour : PQ_Central;
+
+        float eps = 1e-5;
+        float c_NW = raw(pos, -1, -1, size); float c_NE = raw(pos, 1, -1, size);
+        float c_SW = raw(pos, -1, 1, size);  float c_SE = raw(pos, 1, 1, size);
+
+        float NW_Grad = eps + abs(c_NW - c_SE) + abs(c_NW - raw(pos, -3, -3, size)) + abs(g_center - green(pos, -2, -2, size));
+        float NE_Grad = eps + abs(c_NE - c_SW) + abs(c_NE - raw(pos, 3, -3, size)) + abs(g_center - green(pos, 2, -2, size));
+        float SW_Grad = eps + abs(c_SW - c_NE) + abs(c_SW - raw(pos, -3, 3, size)) + abs(g_center - green(pos, -2, 2, size));
+        float SE_Grad = eps + abs(c_SE - c_NW) + abs(c_SE - raw(pos, 3, 3, size)) + abs(g_center - green(pos, 2, 2, size));
+
+        float P_Est = (NW_Grad * (c_SE - green(pos, 1, 1, size)) + SE_Grad * (c_NW - green(pos, -1, -1, size))) / (NW_Grad + SE_Grad);
+        float Q_Est = (NE_Grad * (c_SW - green(pos, -1, 1, size)) + SW_Grad * (c_NE - green(pos, 1, -1, size))) / (NE_Grad + SW_Grad);
+
+        float interpolated_diff = mix(P_Est, Q_Est, PQ_Disc);
+
+        float diff_NW = c_NW - green(pos, -1, -1, size);
+        float diff_NE = c_NE - green(pos,  1, -1, size);
+        float diff_SW = c_SW - green(pos, -1,  1, size);
+        float diff_SE = c_SE - green(pos,  1,  1, size);
+
+        float min_diff = min(min(diff_NW, diff_NE), min(diff_SW, diff_SE));
+        float max_diff = max(max(diff_NW, diff_NE), max(diff_SW, diff_SE));
+        interpolated_diff = clamp(interpolated_diff, min_diff, max_diff);
+
+        float interp = g_center + interpolated_diff;
+
+        if (isRed) imageStore(outChroma, pos, vec4(raw(pos, 0, 0, size), g_center, interp, 1.0));
+        else imageStore(outChroma, pos, vec4(interp, g_center, raw(pos, 0, 0, size), 1.0));
+    }
+)glsl";
+
+const char* rcdRgbgSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
+    uniform sampler2D uChromaTex; uniform sampler2D uVHLPFTex; uniform int yOffset;
+    layout(rgba16f, binding = 0) uniform writeonly highp image2D outRGB;
+    uniform int cfaPattern;
+
+    vec4 chroma(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uChromaTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0); }
+    float vh_dir(ivec2 pos, int dx, int dy, ivec2 size) { return texelFetch(uVHLPFTex, clamp(pos + ivec2(dx, dy), ivec2(0), size - 1), 0).r; }
+
+    float solve(float cN, float cS, float cW, float cE, float cNN, float cSS, float cWW, float cEE,
+                float N1, float S1, float W1, float E1,
+                float rgb1mw1, float rgb1pw1, float rgb1m1, float rgb1p1, float VH_Disc) {
+        float SNabs = abs(cN - cS); float EWabs = abs(cW - cE);
+        float N_Grad = N1 + SNabs + abs(cN - cNN); float S_Grad = S1 + SNabs + abs(cS - cSS);
+        float W_Grad = W1 + EWabs + abs(cW - cWW); float E_Grad = E1 + EWabs + abs(cE - cEE);
+        float V_Est = (N_Grad * (cS - rgb1pw1) + S_Grad * (cN - rgb1mw1)) / (N_Grad + S_Grad);
+        float H_Est = (E_Grad * (cW - rgb1m1) + W_Grad * (cE - rgb1p1)) / (E_Grad + W_Grad);
+        return mix(V_Est, H_Est, VH_Disc);
+    }
+
+    void main() {
+        ivec2 pos = ivec2(int(gl_GlobalInvocationID.x), int(gl_GlobalInvocationID.y) + yOffset);
+        ivec2 size = textureSize(uChromaTex, 0);
+        if(pos.x >= size.x || pos.y >= size.y) return;
+
+        int bayer = ((pos.y & 1) << 1) | (pos.x & 1);
+        int mappedBayer = bayer ^ cfaPattern;
+        bool isGreen = (mappedBayer == 1 || mappedBayer == 2);
+        vec4 center = chroma(pos, 0, 0, size);
+
+        if (!isGreen) { imageStore(outRGB, pos, vec4(max(center.rgb, vec3(0.0)), 1.0)); return; }
+
+        float VH_Central = vh_dir(pos, 0, 0, size);
+        float VH_Neighbour = 0.25 * (vh_dir(pos, -1, -1, size) + vh_dir(pos, 1, -1, size) + vh_dir(pos, -1, 1, size) + vh_dir(pos, 1, 1, size));
+        float VH_Disc = (abs(0.5 - VH_Central) < abs(0.5 - VH_Neighbour)) ? VH_Neighbour : VH_Central;
+
+        float eps = 1e-5; float rgb1 = center.g;
+        float N1 = eps + abs(rgb1 - chroma(pos, 0, -2, size).g); float S1 = eps + abs(rgb1 - chroma(pos, 0, 2, size).g);
+        float W1 = eps + abs(rgb1 - chroma(pos, -2, 0, size).g); float E1 = eps + abs(rgb1 - chroma(pos, 2, 0, size).g);
+
+        float rgb1mw1 = chroma(pos, 0, -1, size).g; float rgb1pw1 = chroma(pos, 0, 1, size).g;
+        float rgb1m1  = chroma(pos, -1, 0, size).g; float rgb1p1  = chroma(pos, 1, 0, size).g;
+
+        float rN = chroma(pos, 0, -1, size).r; float rS = chroma(pos, 0, 1, size).r;
+        float rW = chroma(pos, -1, 0, size).r; float rE = chroma(pos, 1, 0, size).r;
+
+        float bN = chroma(pos, 0, -1, size).b; float bS = chroma(pos, 0, 1, size).b;
+        float bW = chroma(pos, -1, 0, size).b; float bE = chroma(pos, 1, 0, size).b;
+
+        float diff_R = solve(rN, rS, rW, rE,
+                             chroma(pos, 0, -3, size).r, chroma(pos, 0, 3, size).r, chroma(pos, -3, 0, size).r, chroma(pos, 3, 0, size).r,
+                             N1, S1, W1, E1, rgb1mw1, rgb1pw1, rgb1m1, rgb1p1, VH_Disc);
+
+        float diff_B = solve(bN, bS, bW, bE,
+                             chroma(pos, 0, -3, size).b, chroma(pos, 0, 3, size).b, chroma(pos, -3, 0, size).b, chroma(pos, 3, 0, size).b,
+                             N1, S1, W1, E1, rgb1mw1, rgb1pw1, rgb1m1, rgb1p1, VH_Disc);
+
+        float dRN = rN - chroma(pos,  0, -1, size).g;
+        float dRS = rS - chroma(pos,  0,  1, size).g;
+        float dRW = rW - chroma(pos, -1,  0, size).g;
+        float dRE = rE - chroma(pos,  1,  0, size).g;
+        float min_dR = min(min(dRN, dRS), min(dRW, dRE));
+        float max_dR = max(max(dRN, dRS), max(dRW, dRE));
+        diff_R = clamp(diff_R, min_dR, max_dR);
+
+        float dBN = bN - chroma(pos,  0, -1, size).g;
+        float dBS = bS - chroma(pos,  0,  1, size).g;
+        float dBW = bW - chroma(pos, -1,  0, size).g;
+        float dBE = bE - chroma(pos,  1,  0, size).g;
+        float min_dB = min(min(dBN, dBS), min(dBW, dBE));
+        float max_dB = max(max(dBN, dBS), max(dBW, dBE));
+        diff_B = clamp(diff_B, min_dB, max_dB);
+
+        float final_R = rgb1 + diff_R;
+        float final_B = rgb1 + diff_B;
+
+        imageStore(outRGB, pos, vec4(max(vec3(final_R, rgb1, final_B), vec3(0.0)), 1.0));
+    }
+)glsl";
+
+const char* finalColorPassSource = R"glsl(#version 310 es
+    precision highp float; precision highp int;
+    layout(local_size_x = 16, local_size_y = 16) in;
+
+    uniform sampler2D rcdTexture;
+    layout(std430, binding = 3) buffer OutBuf { float data[]; };
+
+    uniform float rGain; uniform float bGain;
+    uniform float normFactor; uniform int isPq;
+    uniform mat3 colorMatrix;
+    uniform float maxVal;
+    const float exposure = 2.5;
+
+    float linearToPq(float c) {
+        float m1 = 2610.0 / 16384.0;
+        float m2 = (2523.0 / 4096.0) * 128.0;
+        float c1 = 3424.0 / 4096.0;
+        float c2 = (2413.0 / 4096.0) * 32.0;
+        float c3 = (2392.0 / 4096.0) * 32.0;
+        float l = pow(max(c * 0.1, 1e-7), m1);
+        return pow((c1 + c2 * l) / (1.0 + c3 * l), m2);
+    }
+
+    float linearToHlg(float c) {
+        if (c <= 1.0 / 12.0) return sqrt(3.0 * max(c, 0.0));
+        return 0.17883277 * log(max(12.0 * c - 0.28466892, 1e-7)) + 0.55991073;
+    }
+
+    #define s2(a,b) temp=a; a=min(a,b); b=max(temp,b);
+    #define mx3(a,b,c) s2(b,c); s2(a,c);
+    #define mn3(a,b,c) s2(a,b); s2(a,c);
+    #define mnmx3(a,b,c) mx3(a,b,c); s2(a,b);
+
+    float median9(float v[9]) {
+        float temp;
+        mnmx3(v[0], v[1], v[2]);
+        mnmx3(v[3], v[4], v[5]);
+        mnmx3(v[6], v[7], v[8]);
+        mx3(v[0], v[3], v[6]);
+        mnmx3(v[1], v[4], v[7]);
+        mn3(v[2], v[5], v[8]);
+        s2(v[1], v[6]);
+        s2(v[2], v[6]);
+        s2(v[1], v[4]);
+        s2(v[2], v[4]);
+        s2(v[4], v[7]);
+        return v[4];
+    }
+
+    void main() {
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        ivec2 size = textureSize(rcdTexture, 0);
+        if (pos.x >= size.x || pos.y >= size.y) return;
+
+        vec3 p00 = texelFetch(rcdTexture, clamp(pos + ivec2(-1, -1), ivec2(0), size - 1), 0).rgb;
+        vec3 p10 = texelFetch(rcdTexture, clamp(pos + ivec2( 0, -1), ivec2(0), size - 1), 0).rgb;
+        vec3 p20 = texelFetch(rcdTexture, clamp(pos + ivec2( 1, -1), ivec2(0), size - 1), 0).rgb;
+        vec3 p01 = texelFetch(rcdTexture, clamp(pos + ivec2(-1,  0), ivec2(0), size - 1), 0).rgb;
+        vec3 p11 = texelFetch(rcdTexture, pos, 0).rgb;
+        vec3 p21 = texelFetch(rcdTexture, clamp(pos + ivec2( 1,  0), ivec2(0), size - 1), 0).rgb;
+        vec3 p02 = texelFetch(rcdTexture, clamp(pos + ivec2(-1,  1), ivec2(0), size - 1), 0).rgb;
+        vec3 p12 = texelFetch(rcdTexture, clamp(pos + ivec2( 0,  1), ivec2(0), size - 1), 0).rgb;
+        vec3 p22 = texelFetch(rcdTexture, clamp(pos + ivec2( 1,  1), ivec2(0), size - 1), 0).rgb;
+
+        vec3 wb = vec3(normFactor * exposure);
+
+        vec3 c00 = p00 * wb; vec3 c10 = p10 * wb; vec3 c20 = p20 * wb;
+        vec3 c01 = p01 * wb; vec3 c11 = p11 * wb; vec3 c21 = p21 * wb;
+        vec3 c02 = p02 * wb; vec3 c12 = p12 * wb; vec3 c22 = p22 * wb;
+
+        float cr[9];
+        cr[0] = c00.r - c00.g; cr[1] = c10.r - c10.g; cr[2] = c20.r - c20.g;
+        cr[3] = c01.r - c01.g; cr[4] = c11.r - c11.g; cr[5] = c21.r - c21.g;
+        cr[6] = c02.r - c02.g; cr[7] = c12.r - c12.g; cr[8] = c22.r - c22.g;
+        float medCr = median9(cr);
+
+        float cb[9];
+        cb[0] = c00.b - c00.g; cb[1] = c10.b - c10.g; cb[2] = c20.b - c20.g;
+        cb[3] = c01.b - c01.g; cb[4] = c11.b - c11.g; cb[5] = c21.b - c21.g;
+        cb[6] = c02.b - c02.g; cb[7] = c12.b - c12.g; cb[8] = c22.b - c22.g;
+        float medCb = median9(cb);
+
+        float gMin1 = min(min(c00.g, c10.g), min(c20.g, c01.g));
+        float gMin2 = min(min(c21.g, c02.g), min(c12.g, c22.g));
+        float gMin = min(min(gMin1, gMin2), c11.g);
+
+        float gMax1 = max(max(c00.g, c10.g), max(c20.g, c01.g));
+        float gMax2 = max(max(c21.g, c02.g), max(c12.g, c22.g));
+        float gMax = max(max(gMax1, gMax2), c11.g);
+
+        float localContrast = (gMax - gMin) / max(gMax, 1e-5);
+
+        float darkSide = smoothstep(0.8, 0.2, c11.g / max(gMax, 1e-5));
+
+        float fcs = smoothstep(0.3, 0.7, localContrast) * darkSide;
+
+        medCr = mix(medCr, 0.0, fcs);
+        medCb = mix(medCb, 0.0, fcs);
+
+        vec3 rgb = vec3(medCr + c11.g, c11.g, medCb + c11.g);
+
+        rgb = max(vec3(0.0), rgb);
 
         vec3 corrected = colorMatrix * rgb;
-
-        float luma = dot(corrected, vec3(0.2627, 0.6780, 0.0593));
-        float maxChannel = max(corrected.r, max(corrected.g, corrected.b));
-        float desatBlend = smoothstep(0.85, 1.15, maxChannel);
-        corrected = mix(corrected, vec3(luma), desatBlend);
-
         corrected = max(vec3(0.0), corrected);
 
-        if (isPq == 1) {
-            fragColor = vec4(linearToPq(corrected.r), linearToPq(corrected.g), linearToPq(corrected.b), 1.0);
-        } else {
-            fragColor = vec4(linearToHlg(corrected.r), linearToHlg(corrected.g), linearToHlg(corrected.b), 1.0);
+        float sensorR = p11.r / rGain;
+        float sensorG = p11.g;
+        float sensorB = p11.b / bGain;
+        float rawMax = max(sensorR, max(sensorG, sensorB));
+
+        float desatBlend = smoothstep(0.85, 0.98, rawMax);
+
+        float luma = dot(corrected, vec3(0.2627, 0.6780, 0.0593));
+        corrected = mix(corrected, vec3(luma), desatBlend);
+
+        float maxChannel = max(corrected.r, max(corrected.g, corrected.b));
+        float knee = 0.85;
+        if (maxChannel > knee) {
+            float hardLimit = 1.25;
+            float range = hardLimit - knee;
+            float compressedMax = knee + range * (1.0 - exp(-(maxChannel - knee) / range));
+            corrected *= (compressedMax / maxChannel);
         }
+
+        vec3 finalColor;
+        if (isPq == 1)
+            finalColor = vec3(linearToPq(corrected.r), linearToPq(corrected.g), linearToPq(corrected.b));
+        else
+            finalColor = vec3(linearToHlg(corrected.r), linearToHlg(corrected.g), linearToHlg(corrected.b));
+
+        int idx = (pos.y * size.x + pos.x) * 4;
+        data[idx]     = finalColor.r;
+        data[idx + 1] = finalColor.g;
+        data[idx + 2] = finalColor.b;
+        data[idx + 3] = 1.0;
     }
 )glsl";
 
 extern "C" JNIEXPORT jbyteArray JNICALL
 Java_com_cameraw_CameraWISP_processBurstNative(
         JNIEnv* env, jobject thiz, jobjectArray framesArray,
-        jbyteArray outRgbArray, jint width, jint height, jint blackLevel,
+        jbyteArray outRgbArray, jint width, jint height, jint baseBlackLevel,
         jfloat rGain, jfloat bGain, jfloat maxVal,
-        jfloatArray matrixArray, jint bitDepth,
+        jfloatArray matrixArray, jint bitDepth, jint cfaPattern,
         jfloatArray lscMapArray, jint lscMapW, jint lscMapH,
-        jfloat noiseScale, jfloat noiseOffset) {
+        jfloatArray blackLevelsArray, jfloatArray noiseProfilesArray) {
 
     int numFrames = env->GetArrayLength(framesArray);
     float matrix[9]; env->GetFloatArrayRegion(matrixArray, 0, 9, matrix);
     std::vector<float> lscMap(env->GetArrayLength(lscMapArray));
     if (!lscMap.empty()) env->GetFloatArrayRegion(lscMapArray, 0, lscMap.size(), lscMap.data());
+
+    std::vector<float> dynBlackLevels(numFrames * 4);
+    if (blackLevelsArray != nullptr) env->GetFloatArrayRegion(blackLevelsArray, 0, numFrames * 4, dynBlackLevels.data());
+
+    std::vector<float> noiseProfiles(numFrames * 8);
+    if (noiseProfilesArray != nullptr) env->GetFloatArrayRegion(noiseProfilesArray, 0, numFrames * 8, noiseProfiles.data());
 
     std::vector<jshortArray> localRefs(numFrames);
     std::vector<jshort*> frames(numFrames);
@@ -430,7 +673,7 @@ Java_com_cameraw_CameraWISP_processBurstNative(
     std::vector<std::vector<float>> lumaPyramid(numFrames, std::vector<float>(lw * lh));
     std::vector<float> gpuRawArray(width * height * numFrames);
 
-    int gridW = (width + 31) / 32; int gridH = (height + 31) / 32;
+    int gridW = (width + 15) / 16; int gridH = (height + 15) / 16;
     std::vector<float> globalMotionMap(gridW * gridH * numFrames * 2, 0.0f);
 
     int numThreads = std::thread::hardware_concurrency();
@@ -440,27 +683,28 @@ Java_com_cameraw_CameraWISP_processBurstNative(
         int layerOffset = f_idx * (width * height);
         jshort* src = frames[f_idx];
         bool isDng = (bitDepth == 14);
-
         float absoluteSpikeThresh = maxVal * 0.15f;
 
         for (int y = 0; y < height; y++) {
             int cfaY = y % 2;
-
             for (int x = 0; x < width; x++) {
                 int cfaX = x % 2;
                 int colorChannel = (cfaY * 2) + cfaX;
 
-                float val = (float)(src[y * width + x] & 0xFFFF) - (float)blackLevel;
+                int mappedChannel = colorChannel ^ cfaPattern;
 
-                if (x >= 2 && x < width - 2 && y >= 2 && y < height - 2) {
-                    float nL = (float)(src[y * width + x - 2] & 0xFFFF) - (float)blackLevel;
-                    float nR = (float)(src[y * width + x + 2] & 0xFFFF) - (float)blackLevel;
-                    float nT = (float)(src[(y - 2) * width + x] & 0xFFFF) - (float)blackLevel;
-                    float nB = (float)(src[(y + 2) * width + x] & 0xFFFF) - (float)blackLevel;
+                float bl = dynBlackLevels[f_idx * 4 + mappedChannel];
+
+                float val = (float)(src[y * width + x] & 0xFFFF) - bl;
+
+                if (!isDng && x >= 2 && x < width - 2 && y >= 2 && y < height - 2) {
+                    float nL = (float)(src[y * width + x - 2] & 0xFFFF) - bl;
+                    float nR = (float)(src[y * width + x + 2] & 0xFFFF) - bl;
+                    float nT = (float)(src[(y - 2) * width + x] & 0xFFFF) - bl;
+                    float nB = (float)(src[(y + 2) * width + x] & 0xFFFF) - bl;
 
                     float maxNeighbor = std::max({nL, nR, nT, nB});
-
-                    if (val > (maxNeighbor + absoluteSpikeThresh) && val > (maxNeighbor * 1.5f)) {
+                    if (val > (maxNeighbor + absoluteSpikeThresh) && val > (maxNeighbor * 2.5f)) {
                         val = (nL + nR + nT + nB) * 0.25f;
                     }
                 }
@@ -516,11 +760,54 @@ Java_com_cameraw_CameraWISP_processBurstNative(
         std::swap_ranges(gpuRawArray.begin(),
                          gpuRawArray.begin() + layerSize,
                          gpuRawArray.begin() + (bestFrameIdx * layerSize));
+
+        for (int ch = 0; ch < 4; ch++) {
+            std::swap(dynBlackLevels[ch], dynBlackLevels[bestFrameIdx * 4 + ch]);
+        }
     }
 
+    float normTo8Bit = 255.0f / (maxVal * 4.0f);
+
     auto motionWorker = [&](int f_idx) {
-        calculateMotionGridCPU(lumaPyramid[0], lumaPyramid[f_idx], lw, lh, globalMotionMap, f_idx, gridW, gridH);
+        cv::Ptr<cv::DISOpticalFlow> dis_flow = cv::DISOpticalFlow::create(cv::DISOpticalFlow::PRESET_FAST);
+
+        cv::Mat ref8u(lh, lw, CV_8UC1);
+        cv::Mat tgt8u(lh, lw, CV_8UC1);
+
+        for (int y = 0; y < lh; y++) {
+            for (int x = 0; x < lw; x++) {
+                float rVal = lumaPyramid[0][y * lw + x] * normTo8Bit;
+                float tVal = lumaPyramid[f_idx][y * lw + x] * normTo8Bit;
+                ref8u.at<uint8_t>(y, x) = (uint8_t)std::clamp(rVal, 0.0f, 255.0f);
+                tgt8u.at<uint8_t>(y, x) = (uint8_t)std::clamp(tVal, 0.0f, 255.0f);
+            }
+        }
+
+        cv::GaussianBlur(ref8u, ref8u, cv::Size(3, 3), 0.8);
+        cv::GaussianBlur(tgt8u, tgt8u, cv::Size(3, 3), 0.8);
+
+        cv::Mat flow;
+        dis_flow->calc(ref8u, tgt8u, flow);
+
+        int layerOffset = f_idx * gridW * gridH * 2;
+
+        for (int ty = 0; ty < gridH; ty++) {
+            for (int tx = 0; tx < gridW; tx++) {
+                int sampleX = std::clamp(tx * 8 + 4, 0, lw - 1);
+                int sampleY = std::clamp(ty * 8 + 4, 0, lh - 1);
+
+                cv::Vec2f motionVec = flow.at<cv::Vec2f>(sampleY, sampleX);
+
+                float finalDx = motionVec[0] * 2.0f;
+                float finalDy = motionVec[1] * 2.0f;
+
+                int tileOffset = layerOffset + (ty * gridW + tx) * 2;
+                globalMotionMap[tileOffset] = finalDx;
+                globalMotionMap[tileOffset + 1] = finalDy;
+            }
+        }
     };
+
     for (int f = 1; f < numFrames; f++) workers.emplace_back(motionWorker, f);
     for (auto& w : workers) w.join(); workers.clear();
 
@@ -535,10 +822,6 @@ Java_com_cameraw_CameraWISP_processBurstNative(
 
     GLuint computeShader = compileShader(GL_COMPUTE_SHADER, computeShaderSource);
     GLuint computeProgram = glCreateProgram(); glAttachShader(computeProgram, computeShader); glLinkProgram(computeProgram);
-
-    GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexShaderSource);
-    GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
-    GLuint renderProgram = glCreateProgram(); glAttachShader(renderProgram, vertexShader); glAttachShader(renderProgram, fragmentShader); glLinkProgram(renderProgram);
 
     GLuint rawBurstTex; glGenTextures(1, &rawBurstTex); glBindTexture(GL_TEXTURE_2D_ARRAY, rawBurstTex);
     glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_R32F, width, height, numFrames);
@@ -561,8 +844,20 @@ Java_com_cameraw_CameraWISP_processBurstNative(
     glBindImageTexture(0, mergedRawTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
 
     glUniform1i(glGetUniformLocation(computeProgram, "validFrameCount"), numFrames);
-    glUniform1f(glGetUniformLocation(computeProgram, "noiseScale"), noiseScale);
-    glUniform1f(glGetUniformLocation(computeProgram, "noiseOffset"), noiseOffset);
+
+    float best_ns_gr = noiseProfiles[bestFrameIdx * 8 + 2];
+    float best_no_gr = noiseProfiles[bestFrameIdx * 8 + 3];
+    float best_ns_gb = noiseProfiles[bestFrameIdx * 8 + 4];
+    float best_no_gb = noiseProfiles[bestFrameIdx * 8 + 5];
+
+    float finalNoiseScale = ((best_ns_gr + best_ns_gb) / 2.0f) * 1.5f;
+    float finalNoiseOffset = ((best_no_gr + best_no_gb) / 2.0f) * 1.5f;
+
+    glUniform1f(glGetUniformLocation(computeProgram, "noiseScale"), finalNoiseScale);
+    glUniform1f(glGetUniformLocation(computeProgram, "noiseOffset"), finalNoiseOffset);
+    glUniform1f(glGetUniformLocation(computeProgram, "rGain"), rGain);
+    glUniform1f(glGetUniformLocation(computeProgram, "bGain"), bGain);
+    glUniform1i(glGetUniformLocation(computeProgram, "cfaPattern"), cfaPattern);
 
     GLint locMergeYOffset = glGetUniformLocation(computeProgram, "yOffset");
     int slicePixelH = 256;
@@ -572,20 +867,29 @@ Java_com_cameraw_CameraWISP_processBurstNative(
         glDispatchCompute((width + 15) / 16, (curH + 15) / 16, 1);
         glFlush();
     }
-    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
     if (bitDepth == 14) {
         const char* extSrc = R"glsl(#version 310 es
             layout(local_size_x = 16, local_size_y = 16) in;
             layout(r32f, binding = 0) uniform readonly highp image2D mergedRaw;
             layout(std430, binding = 0) buffer OutBuf { uint data[]; };
-            uniform float uBlackLevel;
+            uniform vec4 uBlackLevels;
+            uniform int cfaPattern;
+
             void main() {
                 ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
                 ivec2 size = imageSize(mergedRaw);
                 if(pos.x >= size.x || pos.y >= size.y) return;
+
+                int colorChannel = (pos.y & 1) * 2 + (pos.x & 1);
+                int channel = colorChannel ^ cfaPattern;
+
+                float bl = (channel == 0) ? uBlackLevels.x :
+                           (channel == 1) ? uBlackLevels.y :
+                           (channel == 2) ? uBlackLevels.z : uBlackLevels.w;
                 float val = imageLoad(mergedRaw, pos).r;
-                data[pos.y * size.x + pos.x] = uint(clamp(val + uBlackLevel, 0.0, 65535.0));
+                data[pos.y * size.x + pos.x] = uint(clamp(val + bl, 0.0, 65535.0));
             }
         )glsl";
 
@@ -598,7 +902,11 @@ Java_com_cameraw_CameraWISP_processBurstNative(
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
 
         glUseProgram(extProg);
-        glUniform1f(glGetUniformLocation(extProg, "uBlackLevel"), (float)blackLevel);
+        glUniform4f(glGetUniformLocation(extProg, "uBlackLevels"),
+                    dynBlackLevels[0], dynBlackLevels[1], dynBlackLevels[2], dynBlackLevels[3]);
+
+        glUniform1i(glGetUniformLocation(extProg, "cfaPattern"), cfaPattern);
+
         glBindImageTexture(0, mergedRawTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
 
         glDispatchCompute((width + 15) / 16, (height + 15) / 16, 1);
@@ -619,32 +927,167 @@ Java_com_cameraw_CameraWISP_processBurstNative(
         env->ReleaseByteArrayElements(result, outData, 0);
 
         glDeleteBuffers(1, &ssbo); glDeleteProgram(extProg); glDeleteShader(extShader);
-        glDeleteTextures(1, &rawBurstTex); glDeleteTextures(1, &mergedRawTex); glDeleteTextures(1, &motionGridTex);
+        glDeleteTextures(1, &rawBurstTex); glDeleteTextures(1, &mergedRawTex);
+        glDeleteTextures(1, &motionGridTex);
         glDeleteShader(computeShader); glDeleteProgram(computeProgram);
-        glDeleteShader(vertexShader); glDeleteShader(fragmentShader); glDeleteProgram(renderProgram);
         destroyEGL(egl);
 
         return result;
     } else {
-        GLuint fbo, finalColorTex; glGenFramebuffers(1, &fbo); glGenTextures(1, &finalColorTex); glBindTexture(GL_TEXTURE_2D, finalColorTex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo); glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, finalColorTex, 0);
+        GLuint hlProg = 0;
+        GLuint hlRawTex = 0;
+        {
+            GLuint hlShader = compileShader(GL_COMPUTE_SHADER, hlReconstructSource);
+            hlProg = glCreateProgram();
+            glAttachShader(hlProg, hlShader);
+            glLinkProgram(hlProg);
+            glDeleteShader(hlShader);
 
-        glUseProgram(renderProgram);
-        GLuint vao; glGenVertexArrays(1, &vao); glBindVertexArray(vao);
-        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, mergedRawTex); glUniform1i(glGetUniformLocation(renderProgram, "rawTexture"), 0);
-        glUniform2f(glGetUniformLocation(renderProgram, "texelSize"), 1.0f / width, 1.0f / height);
-        glUniform1f(glGetUniformLocation(renderProgram, "rGain"), rGain); glUniform1f(glGetUniformLocation(renderProgram, "bGain"), bGain);
-        glUniform1f(glGetUniformLocation(renderProgram, "normFactor"), normFactor); glUniform1i(glGetUniformLocation(renderProgram, "isPq"), (bitDepth == 16) ? 1 : 0);
+            glGenTextures(1, &hlRawTex);
+            glBindTexture(GL_TEXTURE_2D, hlRawTex);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_R32F, width, height);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+            glUseProgram(hlProg);
+            glBindImageTexture(0, mergedRawTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+            glBindImageTexture(1, hlRawTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+            glUniform1i(glGetUniformLocation(hlProg, "cfaPattern"), cfaPattern);
+            glUniform1f(glGetUniformLocation(hlProg, "rGain"), rGain);
+            glUniform1f(glGetUniformLocation(hlProg, "bGain"), bGain);
+
+            float avgBl = (dynBlackLevels[0] + dynBlackLevels[1] + dynBlackLevels[2] + dynBlackLevels[3]) * 0.25f;
+            float trueMaxVal = maxVal - avgBl;
+
+            glUniform1f(glGetUniformLocation(hlProg, "clipLevel"), trueMaxVal);
+
+            glDispatchCompute((width + 15) / 16, (height + 15) / 16, 1);
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+        }
+
+        auto buildCompute = [&](const char* src) {
+            GLuint shader = compileShader(GL_COMPUTE_SHADER, src);
+            GLuint prog = glCreateProgram(); glAttachShader(prog, shader); glLinkProgram(prog);
+            glDeleteShader(shader); return prog;
+        };
+        GLuint progVhlpf = buildCompute(rcdVhlpfSource);
+        GLuint progGreen = buildCompute(rcdGreenSource);
+        GLuint progPq = buildCompute(rcdPqSource);
+        GLuint progChromaBr = buildCompute(rcdChromaBrSource);
+        GLuint progRgbg = buildCompute(rcdRgbgSource);
+
+        GLuint rcdTex[5]; glGenTextures(5, rcdTex);
+        auto setupTex = [&](int idx, GLenum format) {
+            glBindTexture(GL_TEXTURE_2D, rcdTex[idx]);
+            glTexStorage2D(GL_TEXTURE_2D, 1, format, width, height);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        };
+
+        setupTex(0, GL_RGBA16F);
+        setupTex(1, GL_R32F);
+        setupTex(2, GL_R32F);
+        setupTex(3, GL_RGBA16F);
+        setupTex(4, GL_RGBA16F);
+        int groupsX = (width + 15) / 16;
+
+        auto dispatchSliced = [&](GLuint prog) {
+            GLint locY = glGetUniformLocation(prog, "yOffset");
+            for (int y = 0; y < height; y += slicePixelH) {
+                int curH = std::min(slicePixelH, height - y);
+                glUniform1i(locY, y);
+                glDispatchCompute(groupsX, (curH + 15) / 16, 1);
+                glFlush();
+            }
+            glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        };
+
+        glUseProgram(progVhlpf);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hlRawTex);
+        glUniform1i(glGetUniformLocation(progVhlpf, "uRawTex"), 0);
+        glBindImageTexture(0, rcdTex[0], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+        float avgBl = (dynBlackLevels[0] + dynBlackLevels[1] + dynBlackLevels[2] + dynBlackLevels[3]) * 0.25f;
+        float trueMaxVal = maxVal - avgBl;
+        glUniform1f(glGetUniformLocation(progVhlpf, "uWhiteBlackRange"), trueMaxVal);
+        dispatchSliced(progVhlpf);
+
+        glUseProgram(progGreen);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hlRawTex);
+        glUniform1i(glGetUniformLocation(progGreen, "uRawTex"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, rcdTex[0]);
+        glUniform1i(glGetUniformLocation(progGreen, "uVHLPFTex"), 1);
+        glBindImageTexture(0, rcdTex[1], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glUniform1f(glGetUniformLocation(progGreen, "uWhiteBlackRange"), trueMaxVal);
+        glUniform1i(glGetUniformLocation(progGreen, "cfaPattern"), cfaPattern);
+        dispatchSliced(progGreen);
+
+        glUseProgram(progPq);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hlRawTex);
+        glUniform1i(glGetUniformLocation(progPq, "uRawTex"), 0);
+        glBindImageTexture(0, rcdTex[2], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glUniform1f(glGetUniformLocation(progPq, "uWhiteBlackRange"), trueMaxVal);
+        dispatchSliced(progPq);
+
+        glUseProgram(progChromaBr);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hlRawTex); glUniform1i(glGetUniformLocation(progChromaBr, "uRawTex"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, rcdTex[1]); glUniform1i(glGetUniformLocation(progChromaBr, "uGreenTex"), 1);
+        glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, rcdTex[2]); glUniform1i(glGetUniformLocation(progChromaBr, "uPQTex"), 2);
+        glBindImageTexture(0, rcdTex[3], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+        glUniform1f(glGetUniformLocation(progChromaBr, "uWhiteBlackRange"), trueMaxVal);
+        glUniform1i(glGetUniformLocation(progChromaBr, "cfaPattern"), cfaPattern);
+        dispatchSliced(progChromaBr);
+
+        glUseProgram(progRgbg);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, rcdTex[3]); glUniform1i(glGetUniformLocation(progRgbg, "uChromaTex"), 0);
+        glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, rcdTex[0]); glUniform1i(glGetUniformLocation(progRgbg, "uVHLPFTex"), 1);
+        glBindImageTexture(0, rcdTex[4], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+        glUniform1i(glGetUniformLocation(progRgbg, "cfaPattern"), cfaPattern);
+        dispatchSliced(progRgbg);
+
+        GLuint finalColorProg = buildCompute(finalColorPassSource);
+
+        GLuint outputSSBO;
+        glGenBuffers(1, &outputSSBO);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputSSBO);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, width * height * 4 * sizeof(float), nullptr, GL_DYNAMIC_READ);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, outputSSBO);
+
+        glUseProgram(finalColorProg);
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, rcdTex[4]); glUniform1i(glGetUniformLocation(finalColorProg, "rcdTexture"), 0);
+        glUniform1f(glGetUniformLocation(finalColorProg, "rGain"), rGain);
+        glUniform1f(glGetUniformLocation(finalColorProg, "bGain"), bGain);
+        glUniform1f(glGetUniformLocation(finalColorProg, "maxVal"), maxVal);
+        float rcdNormFactor = 1.0f / std::max({maxR_gain, maxG_gain, maxB_gain});
+        glUniform1f(glGetUniformLocation(finalColorProg, "normFactor"), rcdNormFactor);
+        glUniform1i(glGetUniformLocation(finalColorProg, "isPq"), (bitDepth == 16) ? 1 : 0);
         float tMat[9] = { matrix[0], matrix[3], matrix[6], matrix[1], matrix[4], matrix[7], matrix[2], matrix[5], matrix[8] };
-        glUniformMatrix3fv(glGetUniformLocation(renderProgram, "colorMatrix"), 1, GL_FALSE, tMat);
+        glUniformMatrix3fv(glGetUniformLocation(finalColorProg, "colorMatrix"), 1, GL_FALSE, tMat);
 
-        glViewport(0, 0, width, height); glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDispatchCompute((width + 15) / 16, (height + 15) / 16, 1);
+        glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
 
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, outputSSBO);
+        float* ssboPtr = (float*)glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, width * height * 4 * sizeof(float), GL_MAP_READ_BIT);
         std::vector<float> gpuRgbOutput(width * height * 4);
-        glReadPixels(0, 0, width, height, GL_RGBA, GL_FLOAT, gpuRgbOutput.data());
+        if (ssboPtr) {
+            memcpy(gpuRgbOutput.data(), ssboPtr, width * height * 4 * sizeof(float));
+            glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+        }
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-        glDeleteVertexArrays(1, &vao); glDeleteShader(computeShader); glDeleteShader(vertexShader); glDeleteShader(fragmentShader); glDeleteProgram(computeProgram); glDeleteProgram(renderProgram); glDeleteFramebuffers(1, &fbo); glDeleteTextures(1, &rawBurstTex); glDeleteTextures(1, &mergedRawTex); glDeleteTextures(1, &finalColorTex); glDeleteTextures(1, &motionGridTex); destroyEGL(egl);
+        glDeleteProgram(finalColorProg);
+        glDeleteBuffers(1, &outputSSBO);
+
+        glDeleteProgram(progVhlpf); glDeleteProgram(progGreen); glDeleteProgram(progPq);
+        glDeleteProgram(progChromaBr); glDeleteProgram(progRgbg);
+        glDeleteTextures(5, rcdTex);
+        glDeleteTextures(1, &rawBurstTex);
+        glDeleteTextures(1, &mergedRawTex);
+        glDeleteTextures(1, &motionGridTex);
+        glDeleteTextures(1, &hlRawTex);
+        glDeleteProgram(hlProg);
+        glDeleteShader(computeShader); glDeleteProgram(computeProgram);
+        destroyEGL(egl);
 
         if (bitDepth == 16) {
             int bytesPerPixel = 6; int rowStride = width * bytesPerPixel + 1;
@@ -659,7 +1102,9 @@ Java_com_cameraw_CameraWISP_processBurstNative(
                         uint16_t fG = (uint16_t)(std::max(0.0f, std::min(1.0f, gpuRgbOutput[i+1])) * 65535.0f);
                         uint16_t fB = (uint16_t)(std::max(0.0f, std::min(1.0f, gpuRgbOutput[i+2])) * 65535.0f);
                         int pOff = rowOffset + 1 + (x * 6);
-                        outData[pOff] = fR >> 8; outData[pOff+1] = fR & 0xFF; outData[pOff+2] = fG >> 8; outData[pOff+3] = fG & 0xFF; outData[pOff+4] = fB >> 8; outData[pOff+5] = fB & 0xFF;
+                        outData[pOff] = fR >> 8; outData[pOff+1] = fR & 0xFF;
+                        outData[pOff+2] = fG >> 8; outData[pOff+3] = fG & 0xFF;
+                        outData[pOff+4] = fB >> 8; outData[pOff+5] = fB & 0xFF;
                     }
                 }
             };

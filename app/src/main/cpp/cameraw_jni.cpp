@@ -45,10 +45,14 @@ struct RawFrameTask {
     jlong timestampUs;
     jint iso;
     jlong shutterNs;
-    double noise[6];
+    double noise[8];
     bool hasNoise;
     float* lscMap;
     int lscW, lscH;
+    std::vector<uint8_t> gyroData;
+    float dynFloats[10];
+    int dynInts[3];
+    long long dynLongs[2];
 };
 
 struct CompressedFrame {
@@ -58,10 +62,14 @@ struct CompressedFrame {
     jint iso;
     jlong shutterNs;
     long compress_time_ms;
-    double noise[6];
+    double noise[8];
     bool hasNoise;
     float* lscMap;
     int lscW, lscH;
+    std::vector<uint8_t> gyroData;
+    float dynFloats[10];
+    int dynInts[3];
+    long long dynLongs[2];
 };
 
 struct MlvContext {
@@ -128,6 +136,10 @@ void worker_thread_func(MlvContext* ctx) {
         } else {
             out_frame.lscMap = nullptr;
         }
+        out_frame.gyroData.swap(task.gyroData);
+        memcpy(out_frame.dynFloats, task.dynFloats, sizeof(task.dynFloats));
+        memcpy(out_frame.dynInts, task.dynInts, sizeof(task.dynInts));
+        memcpy(out_frame.dynLongs, task.dynLongs, sizeof(task.dynLongs));
 
         int out_pool_idx = -1;
         {
@@ -278,43 +290,87 @@ void writer_thread_func(MlvContext* ctx) {
                 expo_block.isoValue = frame_to_write.iso;
                 expo_block.shutterValue = frame_to_write.shutterNs / 1000;
 
+                mlv_c2md_hdr_t c2md_block;
+                size_t lsc_byte_size = 0;
+                bool has_c2md = false;
+
+                if (frame_to_write.hasNoise || frame_to_write.lscMap != nullptr ||
+                    frame_to_write.dynInts[0] != 0 || frame_to_write.dynLongs[0] != 0) {
+                    memset(&c2md_block, 0, sizeof(mlv_c2md_hdr_t));
+                    memcpy(c2md_block.blockType, "C2MD", 4);
+
+                    lsc_byte_size = frame_to_write.lscW * frame_to_write.lscH * 4 * sizeof(float);
+                    c2md_block.blockSize = sizeof(mlv_c2md_hdr_t) + lsc_byte_size;
+                    c2md_block.timestamp = frame_to_write.timestampUs;
+
+                    if (frame_to_write.hasNoise) memcpy(c2md_block.noiseProfile, frame_to_write.noise, sizeof(frame_to_write.noise));
+
+                    c2md_block.lscWidth = frame_to_write.lscW;
+                    c2md_block.lscHeight = frame_to_write.lscH;
+
+                    memcpy(c2md_block.dynamicBlackLevel, frame_to_write.dynFloats, 4 * sizeof(float));
+                    memcpy(c2md_block.neutralColorPoint, frame_to_write.dynFloats + 4, 3 * sizeof(float));
+                    c2md_block.focusDistance = frame_to_write.dynFloats[7];
+                    c2md_block.focusRange[0] = frame_to_write.dynFloats[8];
+                    c2md_block.focusRange[1] = frame_to_write.dynFloats[9];
+
+                    c2md_block.dynamicWhiteLevel = (uint32_t)frame_to_write.dynInts[0];
+                    c2md_block.lensState = (uint8_t)frame_to_write.dynInts[1];
+                    c2md_block.mtkGyroValid = (uint32_t)frame_to_write.dynInts[2];
+
+                    c2md_block.frameDuration = (uint64_t)frame_to_write.dynLongs[0];
+                    c2md_block.rollingShutterSkew = (uint64_t)frame_to_write.dynLongs[1];
+
+                    has_c2md = true;
+                }
+
+                bool has_gyro = !frame_to_write.gyroData.empty();
+                std::vector<struct iovec> iov;
+                iov.reserve(6);
+
+                iov.push_back({&expo_block, sizeof(mlv_expo_hdr_t)});
+
+                if (has_c2md) {
+                    iov.push_back({&c2md_block, sizeof(mlv_c2md_hdr_t)});
+                    if (lsc_byte_size > 0) iov.push_back({frame_to_write.lscMap, lsc_byte_size});
+                }
+
+                if (has_gyro) {
+#pragma pack(push, 1)
+                    struct GyroBlock {
+                        char blockType[4];
+                        uint32_t blockSize;
+                        uint64_t timestamp;
+                    } gyro_hdr;
+#pragma pack(pop)
+                    memcpy(gyro_hdr.blockType, "GYRO", 4);
+                    gyro_hdr.blockSize = sizeof(gyro_hdr) + frame_to_write.gyroData.size();
+                    gyro_hdr.timestamp = frame_to_write.timestampUs;
+                    iov.push_back({&gyro_hdr, sizeof(gyro_hdr)});
+                    iov.push_back({frame_to_write.gyroData.data(), frame_to_write.gyroData.size()});
+                }
+
                 size_t frame_header_size = MLVWriterGetFrameHeaderSize(ctx->writer);
                 uint8_t frame_header_data[frame_header_size];
                 MLVWriterGetFrameHeaderData(ctx->writer, ctx->output_write_counter,
                                             frame_to_write.size, frame_header_data);
                 memcpy(frame_header_data + 16, &frame_to_write.timestampUs, sizeof(uint64_t));
+                iov.push_back({frame_header_data, frame_header_size});
+                iov.push_back({ctx->out_pool[frame_to_write.pool_index], frame_to_write.size});
 
                 {
                     std::lock_guard<std::mutex> file_lock(ctx->file_mutex);
                     int fd = fileno(ctx->file);
-                    std::vector<struct iovec> iov;
-                    iov.push_back({&expo_block, sizeof(mlv_expo_hdr_t)});
-
-                    mlv_c2md_hdr_t c2md_block;
-                    size_t lsc_byte_size = 0;
-                    if (frame_to_write.hasNoise && frame_to_write.lscMap != nullptr) {
-                        memcpy(c2md_block.blockType, "C2MD", 4);
-                        lsc_byte_size = frame_to_write.lscW * frame_to_write.lscH * 4 * sizeof(float);
-                        c2md_block.blockSize = sizeof(mlv_c2md_hdr_t) + lsc_byte_size;
-                        c2md_block.timestamp = frame_to_write.timestampUs;
-                        memcpy(c2md_block.noiseProfile, frame_to_write.noise, sizeof(frame_to_write.noise));
-                        c2md_block.lscWidth = frame_to_write.lscW;
-                        c2md_block.lscHeight = frame_to_write.lscH;
-                        iov.push_back({&c2md_block, sizeof(mlv_c2md_hdr_t)});
-                        iov.push_back({frame_to_write.lscMap, lsc_byte_size});
-                    }
-
-                    iov.push_back({frame_header_data, frame_header_size});
-                    iov.push_back({ctx->out_pool[frame_to_write.pool_index], frame_to_write.size});
                     writev(fd, iov.data(), iov.size());
                 }
 
                 long writeTime = getCurrentTimeMs() - startWrite;
-                LOGI("Frame %llu: Compress: %ldms | Write: %ldms | Size: %.2f MB",
+                LOGI("Frame %llu: Compress: %ldms | Write: %ldms | Size: %.2f MB | Gyro: %zu bytes",
                      (unsigned long long)ctx->output_write_counter,
                      frame_to_write.compress_time_ms,
                      writeTime,
-                     frame_to_write.size / 1024.0f / 1024.0f);
+                     frame_to_write.size / 1024.0f / 1024.0f,
+                     frame_to_write.gyroData.size());
 
                 if (frame_to_write.lscMap) free(frame_to_write.lscMap);
             }
@@ -338,7 +394,8 @@ Java_com_cameraw_CameraViewModel_initMlvWriter(JNIEnv *env, jobject thiz,
                                                jstring cameraName, jfloat focalLength, jfloat aperture,
                                                jfloatArray colorMatrix, jfloat rGain, jfloat gGain, jfloat bGain, jint cfa,
                                                jfloatArray c2stFloats, jintArray c2stInts, jstring softwareStr,
-                                               jint activeW, jint activeH, jint offsetX, jint offsetY) {
+                                               jint activeW, jint activeH, jint offsetX, jint offsetY,
+                                               jfloatArray lensStaticFloats, jint poseReference) {
     const char *path = env->GetStringUTFChars(filePath, nullptr);
     FILE* f = fopen(path, "wb");
     env->ReleaseStringUTFChars(filePath, path);
@@ -480,6 +537,25 @@ Java_com_cameraw_CameraViewModel_initMlvWriter(JNIEnv *env, jobject thiz,
     };
     fwrite(&crop_hdr, 1, sizeof(crop_hdr), ctx->file);
 
+    if (lensStaticFloats != nullptr) {
+        mlv_c2ls_hdr_t c2ls;
+        memset(&c2ls, 0, sizeof(c2ls));
+        memcpy(c2ls.blockType, "C2LS", 4);
+        c2ls.blockSize = sizeof(mlv_c2ls_hdr_t);
+        c2ls.poseReference = (uint8_t)poseReference;
+
+        jfloat* lsFloats = env->GetFloatArrayElements(lensStaticFloats, 0);
+        memcpy(c2ls.poseRotation, lsFloats, 4 * sizeof(float));
+        memcpy(c2ls.poseTranslation, lsFloats + 4, 3 * sizeof(float));
+        memcpy(c2ls.intrinsicCalibration, lsFloats + 7, 5 * sizeof(float));
+        memcpy(c2ls.distortion, lsFloats + 12, 5 * sizeof(float));
+        c2ls.filterDensity = lsFloats[17];
+
+        fwrite(&c2ls, 1, sizeof(c2ls), ctx->file);
+        env->ReleaseFloatArrayElements(lensStaticFloats, lsFloats, 0);
+        ctx->writer->C2LS.write = 1;
+    }
+
     fflush(ctx->file);
 
     env->ReleaseFloatArrayElements(c2stFloats, floats, 0);
@@ -505,11 +581,13 @@ Java_com_cameraw_CameraViewModel_initMlvWriter(JNIEnv *env, jobject thiz,
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_cameraw_CameraViewModel_nativeWriteVideoFrameWithMetadata(JNIEnv *env, jobject thiz, jlong contextPtr,
-                                                                   jobject hardwareBuffer, jboolean isLeftShifted,
+                                                                   jobject hardwareBuffer,
                                                                    jlong timestampUs, jint iso, jlong shutterNs,
-                                                                   jdoubleArray noiseArray,
-                                                                   jfloatArray lscArray, jint lscW, jint lscH,
-                                                                   jint rowStrideBytes, jint offsetX, jint offsetY) {
+                                                                   jdoubleArray noiseArray, jfloatArray lscArray,
+                                                                   jint lscW, jint lscH, jint rowStrideBytes,
+                                                                   jint offsetX, jint offsetY,
+                                                                   jfloatArray dynFloats, jintArray dynInts, jlongArray dynLongs,
+                                                                   jbyteArray gyroData) {
     MlvContext* ctx = reinterpret_cast<MlvContext*>(contextPtr);
     if (!ctx) return;
 
@@ -530,11 +608,11 @@ Java_com_cameraw_CameraViewModel_nativeWriteVideoFrameWithMetadata(JNIEnv *env, 
 
     uint64_t frame_idx = ctx->input_frame_counter++;
 
-    double noise[6] = {0};
+    double noise[8] = {0};
     if (noiseArray != nullptr) {
         jdouble* noiseElements = env->GetDoubleArrayElements(noiseArray, nullptr);
         jsize len = env->GetArrayLength(noiseArray);
-        memcpy(noise, noiseElements, std::min<size_t>(len, 6) * sizeof(double));
+        memcpy(noise, noiseElements, std::min<size_t>(len, 8) * sizeof(double));
         env->ReleaseDoubleArrayElements(noiseArray, noiseElements, JNI_ABORT);
     }
 
@@ -544,6 +622,15 @@ Java_com_cameraw_CameraViewModel_nativeWriteVideoFrameWithMetadata(JNIEnv *env, 
         if (lscSize > 0) {
             lscCopy = (float*)malloc(lscSize * sizeof(float));
             env->GetFloatArrayRegion(lscArray, 0, lscSize, lscCopy);
+        }
+    }
+
+    std::vector<uint8_t> gyroCopy;
+    if (gyroData != nullptr) {
+        jsize gyroSize = env->GetArrayLength(gyroData);
+        if (gyroSize > 0) {
+            gyroCopy.resize(gyroSize);
+            env->GetByteArrayRegion(gyroData, 0, gyroSize, reinterpret_cast<jbyte*>(gyroCopy.data()));
         }
     }
 
@@ -561,6 +648,15 @@ Java_com_cameraw_CameraViewModel_nativeWriteVideoFrameWithMetadata(JNIEnv *env, 
     task.lscMap = lscCopy;
     task.lscW = lscW;
     task.lscH = lscH;
+    task.gyroData = std::move(gyroCopy);
+
+    memset(task.dynFloats, 0, sizeof(task.dynFloats));
+    memset(task.dynInts, 0, sizeof(task.dynInts));
+    memset(task.dynLongs, 0, sizeof(task.dynLongs));
+
+    if (dynFloats != nullptr) env->GetFloatArrayRegion(dynFloats, 0, 10, task.dynFloats);
+    if (dynInts != nullptr) env->GetIntArrayRegion(dynInts, 0, 3, task.dynInts);
+    if (dynLongs != nullptr) env->GetLongArrayRegion(dynLongs, 0, 2, reinterpret_cast<jlong*>(task.dynLongs));
 
     {
         std::lock_guard<std::mutex> lock(ctx->queue_mutex);
