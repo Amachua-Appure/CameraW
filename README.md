@@ -11,6 +11,7 @@ This project is inspired by open-source RAW video codecs such as [MLV](https://g
 
 ### Professional Video Recording
 * **RAW Video Capture:** Records losslessly compressed RAW_SENSOR video format directly from the camera sensor into a single .mlv file, allowing users to get the absolute color and dynamic range directly as the camera sees. Stores exhaustive static and per-frame dynamic metadata that is very useful for raw development. Also stores **mediatek specific** **Gyro data** in the raw file that can be later used for stabilzation in post.
+  
    *If the device does not have a mediatek soc, use the universal gyro logging option*
 * **True HDR10+ Video:** Utilizes a custom GLES pipeline for hardware-accelerated HEVC encoding with dynamic metadata injection (calculating minimum, maximum, and average brightness per frame) mapped to the BT.2020/ST2084 (PQ) color space.
 * **Log Profiles** Include a Log Profile option that allows users to shoot in various different log formats - Apple log, Apple log 2, Samsung log, ARRI log c3, S-log 3.cine, Pansonic V-log and an accompanying custom LUT application option that lets users import LUTs and get baked-in cinematic videos dircetly *(Pro Video mode)*
