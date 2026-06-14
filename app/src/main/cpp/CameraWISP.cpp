@@ -124,6 +124,9 @@ const char* computeShaderSource = R"glsl(#version 310 es
 
         for (int i = 1; i < validFrameCount; i++) {
             vec2 shift = texture(motionGrid, vec3(uv, float(i))).rg;
+            float motionMagSq = dot(shift, shift);
+            float motionGate = exp(-motionMagSq / 16.0);
+
             vec2 targetFloatPos = vec2(texelPos) + shift;
 
             if (targetFloatPos.x < 0.0 || targetFloatPos.x > float(imgSize.x - 2) || targetFloatPos.y < 0.0 || targetFloatPos.y > float(imgSize.y - 2)) continue;
@@ -165,11 +168,11 @@ const char* computeShaderSource = R"glsl(#version 310 es
 
             if (isChroma) {
                 float chromaDiff = tgtChromaPerceptual - refChromaPerceptual;
-                float chromaDenom = tuningDenom * 8.0;
+                float chromaDenom = tuningDenom * 2.0;
 
                 float wChroma = chromaDenom / (chromaDenom + (chromaDiff * chromaDiff));
 
-                wChroma = min(wChroma, wLuma * 2.0);
+                wChroma = min(wChroma, (wLuma * wLuma) * motionGate);
 
                 chromaPixelSum += tgtChromaRaw * wChroma;
                 chromaWeightSum += wChroma;
@@ -783,8 +786,11 @@ Java_com_cameraw_CameraWISP_processBurstNative(
             }
         }
 
-        cv::GaussianBlur(ref8u, ref8u, cv::Size(3, 3), 0.8);
-        cv::GaussianBlur(tgt8u, tgt8u, cv::Size(3, 3), 0.8);
+        cv::medianBlur(ref8u, ref8u, 5);
+        cv::medianBlur(tgt8u, tgt8u, 5);
+
+        cv::GaussianBlur(ref8u, ref8u, cv::Size(15, 15), 4.0);
+        cv::GaussianBlur(tgt8u, tgt8u, cv::Size(15, 15), 4.0);
 
         cv::Mat flow;
         dis_flow->calc(ref8u, tgt8u, flow);
