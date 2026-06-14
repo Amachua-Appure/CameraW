@@ -10,8 +10,10 @@ This project is inspired by open-source RAW video codecs such as [MLV](https://g
 ## Key Features
 
 ### Professional Video Recording
-* **RAW Video Capture:** Records losslessly compressed RAW_SENSOR video formats directly from the camera sensor into a single .mlv file, allowing users to get the absolute color and dynamic range directly as the camera sees.
+* **RAW Video Capture:** Records losslessly compressed RAW_SENSOR video format directly from the camera sensor into a single .mlv file, allowing users to get the absolute color and dynamic range directly as the camera sees. Stores exhaustive static and per-frame dynamic metadata that is very useful for raw development. Also stores **mediatek specific** **Gyro data** in the raw file that can be later used for stabilzation in post.
+   *If the device does not have a mediatek soc, use the universal gyro logging option*
 * **True HDR10+ Video:** Utilizes a custom GLES pipeline for hardware-accelerated HEVC encoding with dynamic metadata injection (calculating minimum, maximum, and average brightness per frame) mapped to the BT.2020/ST2084 (PQ) color space.
+* **Log Profiles** Include a Log Profile option that allows users to shoot in various different log formats - Apple log, Apple log 2, Samsung log, ARRI log c3, S-log 3.cine, Pansonic V-log and an accompanying custom LUT application option that lets users import LUTs and get baked-in cinematic videos dircetly *(Pro Video mode)*
 * **High-Fidelity Audio Pipeline:** Bypasses standard Android audio muxers to support storing uncompressed WAV and high-bitrate Opus audio streams synchronously alongside video streams in Pro Video mode.
 * **Motion Logging for Stabilization:** Logs raw IMU data (gyroscope and accelerometer) synchronously with video frames to a standard `.gcsv` logging format, enabling advanced post-capture software stabilization via Gyroflow.
 * **Hardware Encoder Desqueeze:** Calculates custom sample aspect ratios (SAR) to handle capture resolutions that exceed Android MediaCodec hardware limits. (e.g., A 12MP sensor output exceeding the HEVC 3840x2160 limit is hardware-squished for encoding, allowing standard media players to desqueeze it accurately during playback).
@@ -25,8 +27,10 @@ This project is inspired by open-source RAW video codecs such as [MLV](https://g
 ### Interface and Manual Controls
 * **Hardware-Level Manual Override:** Provides smooth, continuous control over ISO, precise Shutter Speed (dynamically calculated to avoid lighting flicker at given frame rates), White Balance (Kelvin), and physical Focus Distance.
 * **Live Histogram:** Displays a real-time, hardware-buffer-derived YUV luma histogram with active clipping indicators for shadow and highlight protection.
+* **Clipping Zebras** Displays clipping indicators in colored zebra stripes that show up whenever shadows or highlights or both are clipping.
 * **Declarative UI:** Built entirely with Jetpack Compose, featuring fluid animations, hidden carousels, and a pure-black edge-to-edge layout designed for OLED displays.
 * **Integrated Media Viewer:** Includes a built-in gallery utilizing ExoPlayer for HDR video playback and Coil for high-resolution image formats. (Needs more work!)
+* **Diagnostics** A single button in the settings that instantly dumps camera characteristics and codec characteristics for debugging.
 
 ---
 
